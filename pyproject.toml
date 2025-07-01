@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "OctoPrint-MoonrakerConnector"
+version = "0.1.0"
+description = "Connector plugin to allow connecting to Moonraker enabled Klipper based printers"
+authors = [
+    {name = "Gina Häußge", email = "gina@octoprint.org"}
+]
+readme = {file = "README.md", content-type = "markdown"}
+dynamic = [
+    "license"
+]
+
+requires-python = ">=3.7, <4"
+
+# any additional requirements (besides OctoPrint) should be listed here
+dependencies = []
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = [
+    "octoprint_moonraker_connector",
+    "octoprint_moonraker_connector.*"
+]
+
+[project.entry-points."octoprint.plugin"]
+moonraker_connector = "octoprint_moonraker_connector"
+
+[project.urls]
+Homepage = "https://github.com/OctoPrint/OctoPrint-MoonrakerConnector"
+
+[project.optional-dependencies]
+develop = [
+    "go-task-bin"
+]

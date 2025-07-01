@@ -1,0 +1,4 @@
+include README.md
+recursive-include octoprint_moonraker_connector/templates *
+recursive-include octoprint_moonraker_connector/translations *
+recursive-include octoprint_moonraker_connector/static *

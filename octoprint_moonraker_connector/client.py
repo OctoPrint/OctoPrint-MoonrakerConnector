@@ -1,0 +1,602 @@
+import enum
+import logging
+import time
+from concurrent.futures import Future
+from typing import Any
+
+from octoprint.printer.connection import ConnectedPrinterState
+from octoprint.schema import BaseModel
+
+from .jsonrpc import JsonRpcClient
+
+
+class FileInfo(BaseModel):
+    path: str
+    modified: float
+    size: int
+    permissions: str
+
+
+class TemperatureDataPoint:
+    actual: float = 0.0
+    target: float = 0.0
+
+    def __init__(self, actual: float = 0.0, target: float = 0.0):
+        self.actual = actual
+        self.target = target
+
+    def __str__(self):
+        return f"{self.actual} / {self.target}"
+
+    def __repr__(self):
+        return f"TemperatureDataPoint({self.actual}, {self.target})"
+
+
+class MoonrakerClientListener:
+    def on_moonraker_connected(self) -> None:
+        pass
+
+    def on_moonraker_disconnected(self, error: str = None) -> None:
+        pass
+
+    def on_moonraker_state_changed(
+        self, state: ConnectedPrinterState, error: str = None
+    ) -> None:
+        pass
+
+    def on_moonraker_server_info(self, server_info: dict[str, Any]) -> None:
+        pass
+
+    def on_moonraker_printer_files_updated(self, files: list[FileInfo]) -> None:
+        pass
+
+    def on_moonraker_temperature_update(
+        self, data: dict[str, TemperatureDataPoint]
+    ) -> None:
+        pass
+
+    def on_moonraker_gcode_log(self, *line: str) -> None:
+        pass
+
+
+class KlipperState(enum.Enum):
+    READY = "ready"
+    ERROR = "error"
+    SHUTDOWN = "shutdown"
+    STARTUP = "startup"
+    DISCONNECTED = "disconnected"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def lookup(cls, value: str) -> "KlipperState":
+        for state in cls:
+            if state.value == value:
+                return state
+        return KlipperState.UNKNOWN
+
+
+KLIPPER_STATE_ERROR_LOOKUP = {
+    KlipperState.STARTUP: "Klipper is still starting up",
+    KlipperState.ERROR: "Klipper experienced an error during startup",
+    KlipperState.SHUTDOWN: "Klipper is in a shutdown state",
+    KlipperState.DISCONNECTED: "Klipper is not running, has experienced a critical error during startup or doesn't have its API server enabled",
+}
+
+MAX_HANDSHAKE_ATTEMPTS = 5
+
+TEMPERATURE_INTERVAL = 1.0
+
+
+class MoonrakerClient(JsonRpcClient):
+    WEBSOCKET_URL = "ws://{host}:{port}/websocket"
+
+    GENERIC_HEATER_PREFIX = "heater_generic "
+
+    RELEVANT_PRINTER_OBJECTS = (
+        "display_status",
+        "extruder",
+        "heater_bed",
+        "print_stats",
+        "virtual_sdcard",
+        lambda obj_list: [
+            x for x in obj_list if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+        ],
+    )
+
+    def __init__(
+        self,
+        listener: MoonrakerClientListener,
+        host: str,
+        port: int = 7125,
+        apikey: str = None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(self.WEBSOCKET_URL.format(host=host, port=port), *args, **kwargs)
+
+        self._logger = logging.getLogger(__name__)
+
+        self._apikey = apikey
+        self._listener = listener
+        self._connection_id = None
+
+        self._klipper_state: KlipperState = KlipperState.UNKNOWN
+        self._klipper_state_subscription = False
+
+        self._log_history_received = False
+
+        self._heaters: list[str] = []
+        self._current_temperatures: dict[str, TemperatureDataPoint] = {}
+        self._last_temperature_update = None
+
+        self._current_files: list[FileInfo] = []
+
+        self._handshake_attempt = 0
+
+    @property
+    def klipper_state(self) -> KlipperState:
+        return self._klipper_state
+
+    @klipper_state.setter
+    def klipper_state(self, value: KlipperState) -> None:
+        if value == self.klipper_state:
+            return
+
+        old_state = self.klipper_state
+
+        self._klipper_state = value
+
+        if old_state != KlipperState.READY and value == KlipperState.READY:
+            self.attempt_handshake(reset=True)
+
+    @property
+    def current_temperatures(self) -> list[TemperatureDataPoint]:
+        return self._current_temperatures
+
+    @property
+    def current_files(self) -> list[FileInfo]:
+        return self._current_files
+
+    def on_open(self, *args, **kwargs):
+        try:
+            super().on_open(*args, **kwargs)
+            self.identify_connection(cb=self.attempt_handshake, cb_kwargs={"reset": True})
+        except Exception:
+            self._logger.exception("Error in on_open handler")
+
+    def on_close(self, cls, code: int, reason: str):
+        try:
+            super().on_close(cls, code, reason)
+            error = None
+            if code != 1000:
+                error = f"Websocket closed unexpectedly: {reason}"
+            self._listener.on_moonraker_disconnected(error=error)
+        except Exception:
+            self._logger.exception("Error in on_close handler")
+
+    def on_error(self, cls, exc: Exception) -> None:
+        try:
+            super().on_error(cls, exc)
+            self._listener.on_moonraker_disconnected(error=str(exc))
+        except Exception:
+            self._logger.exception("Error in on_error handler")
+
+    def on_message(self, cls, message, *args, **kwargs):
+        try:
+            super().on_message(cls, message, *args, **kwargs)
+        except Exception:
+            self._logger.exception("Error in on_message handler")
+
+    ##~~ Initial connection handling
+
+    def identify_connection(
+        self, cb=None, cb_args: tuple = None, cb_kwargs: dict[str, Any] = None
+    ) -> None:
+        from octoprint import __version__ as octoprint_version
+
+        def on_connection_identified(future: Future) -> None:
+            try:
+                result = future.result()
+
+                self._connection_id = result["connection_id"]
+                self._logger.info(
+                    f"Connection identified, got connection id {self._connection_id}"
+                )
+
+                if callable(cb):
+                    nonlocal cb_args, cb_kwargs
+                    if cb_args is None:
+                        cb_args = ()
+                    if cb_kwargs is None:
+                        cb_kwargs = {}
+                    cb(*cb_args, **cb_kwargs)
+
+            except Exception as exc:
+                self._logger.exception("Error while identifying connection")
+                error_str = (
+                    f"Error while identifying connection: {str(exc)}. API Key correct?"
+                )
+                self._listener.on_moonraker_disconnected(error=error_str)
+
+        payload = {
+            "client_name": "OctoPrint",
+            "version": octoprint_version,
+            "type": "web",
+            "url": "https://octoprint.org",
+        }
+        if self._apikey:
+            payload["api_key"] = self._apikey
+        self.call_method("server.connection.identify", params=payload).add_done_callback(
+            on_connection_identified
+        )
+
+    def attempt_handshake(self, reset=False) -> None:
+        if reset:
+            self._handshake_attempt = 0
+
+        if not self._klipper_state_subscription:
+            # subscribe to the klippy state
+            for topic in ("ready", "disconnected", "shutdown"):
+                self.add_subscription(
+                    f"notify_klippy_{topic}", self.on_klippy_state_change
+                )
+            self._klipper_state_subscription = True
+
+        self._handshake_attempt += 1
+        if self._handshake_attempt > MAX_HANDSHAKE_ATTEMPTS:
+            self._listener.on_moonraker_disconnected(
+                "Reached maximum connection attempts"
+            )
+            return
+
+        def on_server_info(future: Future) -> None:
+            try:
+                server_info = future.result()
+
+                self._klipper_state = KlipperState.lookup(
+                    server_info.get("klippy_state", "unknown")
+                )
+
+                if self.klipper_state == KlipperState.READY:
+                    # proceed with connection
+                    self._listener.on_moonraker_server_info(server_info)
+
+                    moonraker_version = server_info.get("moonraker_version")
+                    api_version = server_info.get("api_version_string")
+                    self._dual_log(
+                        logging.INFO,
+                        f"Connected to Moonraker {moonraker_version}, API version {api_version}",
+                    )
+
+                    self.fetch_console_history()
+                    self.subscribe_to_updates()
+
+                else:
+                    # log error
+                    error = KLIPPER_STATE_ERROR_LOOKUP.get(self._klipper_state)
+                    self._listener.on_moonraker_gcode_log(f"!!! {error}")
+                    self._dual_log(logging.ERROR, error)
+
+            except Exception as exc:
+                self._logger.exception("Error while retrieving server info")
+                error_str = f"Error while retrieving server info: {str(exc)}. Please check moonraker.log for details."
+                self._listener.on_moonraker_disconnected(error=error_str)
+
+        self.call_method("server.info").add_done_callback(on_server_info)
+
+    def subscribe_to_updates(self) -> None:
+        # subscribe to some status notifications
+
+        self.add_subscription("notify_status_update", self.on_printer_update)
+        self.add_subscription("notify_filelist_changed", self.on_filelist_changed)
+        self.add_subscription("notify_gcode_response", self.on_gcode_response)
+
+        # and finally subscribe to the printer objects we are interested in
+
+        def on_printer_objects(future: Future) -> None:
+            try:
+                printer_objects = future.result()
+
+                obj_subs = []
+
+                obj_list = printer_objects.get("objects", [])
+                for obj in self.RELEVANT_PRINTER_OBJECTS:
+                    if isinstance(obj, str) and obj in obj_list:
+                        obj_subs.append(obj)
+
+                    elif callable(obj):
+                        matched = obj(obj_list)
+                        obj_subs += matched
+
+                if obj_subs:
+                    self._heaters = [
+                        x
+                        for x in obj_subs
+                        if x in ("extruder", "heater_bed")
+                        or x.startswith(self.GENERIC_HEATER_PREFIX)
+                    ]
+
+                    self.query_printer_objects(obj_subs)
+                    self.subscribe_printer_objects(obj_subs).add_done_callback(
+                        on_printer_objects_subscribed
+                    )
+
+            except Exception as exc:
+                self._logger.exception("Error while retrieving printer objects")
+                error_str = f"Error while retrieving printer objects: {str(exc)}"
+                self._listener.on_moonraker_disconnected(error=error_str)
+
+        def on_printer_objects_subscribed(future: Future) -> None:
+            try:
+                future.result()
+                self._listener.on_moonraker_connected()
+
+            except Exception as exc:
+                self._logger.exception("Error while subscribing to printer objects")
+                error_str = f"Error while subscribing to printer objects: {str(exc)}"
+                self._listener.on_moonraker_disconnected(error=error_str)
+                return
+
+        self.call_method("printer.objects.list").add_done_callback(on_printer_objects)
+
+    ##~~ Method calls & callbacks
+
+    def query_printer_objects(self, objs: list[str]) -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                result = future.result()
+
+                if "status" not in result:
+                    self._logger.warning(
+                        "Printer object query result is missing expected objects field"
+                    )
+                    return
+
+                payload = result["status"]
+                self._update_temperatures(payload)
+
+            except Exception:
+                self._logger.exception("Error while querying printer objects")
+
+        params = {"objects": dict.fromkeys(objs)}
+        future = self.call_method("printer.objects.query", params=params)
+        future.add_done_callback(on_result)
+        return future
+
+    def subscribe_printer_objects(self, objs: list[str]) -> Future:
+        params = {"objects": dict.fromkeys(objs)}
+        return self.call_method("printer.objects.subscribe", params=params)
+
+    def fetch_console_history(self, count: int = 100, force: bool = False) -> Future:
+        if self._log_history_received and not force:
+            return
+
+        def on_result(future: Future) -> None:
+            try:
+                result = future.result()
+
+                if "gcode_store" not in result:
+                    self._logger.warning(
+                        "GCODE store response is missing expected objects field"
+                    )
+                    return
+
+                lines = []
+                for entry in result["gcode_store"]:
+                    if "message" not in entry or "type" not in entry:
+                        continue
+
+                    if entry["type"] == "command":
+                        lines += self._to_multiline_loglines(
+                            ">>>", *entry["message"].split("\n")
+                        )
+                    elif entry["type"] == "response":
+                        lines += self._to_multiline_loglines(
+                            "<<<", *entry["message"].split("\n")
+                        )
+
+                if lines:
+                    self._listener.on_moonraker_gcode_log(
+                        "--- 8< --- Begin of console history --- 8< ---",
+                        *lines,
+                        "--- 8< --- End of console history --- 8< ---",
+                    )
+                self._log_history_received = True
+
+            except Exception:
+                self._logger.exception("Error while fetching console history")
+
+        self.call_method("server.gcode_store", params={"count": count}).add_done_callback(
+            on_result
+        )
+
+    # commands
+
+    def send_gcode_commands(self, *commands: str) -> Future:
+        if "M112" in commands:
+            return self.trigger_emergency_stop()
+        return self.send_gcode_script("\n".join(commands))
+
+    def send_gcode_script(self, script: str) -> Future:
+        if not len(script):
+            return
+
+        self._listener.on_moonraker_gcode_log(
+            *self._to_multiline_loglines(">>>", *script.split("\n"))
+        )
+
+        def on_result(future: Future) -> None:
+            try:
+                result = future.result()
+                self._listener.on_moonraker_gcode_log(f"<<< {result}")
+            except Exception:
+                self._logger.exception("Error while sending GCODE commands to printer")
+
+        future = self.call_method("printer.gcode.script", params={"script": script})
+        future.add_done_callback(on_result)
+        return future
+
+    def trigger_emergency_stop(self) -> Future:
+        self._listener.on_moonraker_gcode_log("--- Triggering an Emergency Stop!")
+        return self.call_method("printer.emergency_stop")
+
+    def trigger_host_restart(self) -> Future:
+        self._listener.on_moonraker_gcode_log(">>> RESTART")
+        return self.call_method("printer.restart")
+
+    def trigger_firmware_restart(self) -> Future:
+        self._listener.on_moonraker_gcode_log(">>> FIRMWARE_RESTART")
+        return self.call_method("printer.firmware_restart")
+
+    # file management
+
+    def refresh_files(self, root="gcodes") -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                files = future.result()
+                self._current_files = [FileInfo(**f) for f in files]
+                self._listener.on_moonraker_printer_files_updated(self._current_files)
+            except Exception:
+                self._logger.exception(f"Error while fetching file list for {root}")
+
+        future = self.call_method("server.files.list", params={"root": root})
+        future.add_done_callback(on_result)
+        return future
+
+    def upload_file(self, path: str, root: str = "gcodes", *args, **kwargs) -> Future:
+        pass
+
+    def download_file(self, path: str, root: str = "gcodes") -> Future:
+        pass
+
+    def delete_file(self, path: str, root: str = "gcodes") -> Future:
+        return self.call_method(
+            "server.files.delete_file", params={"path": f"{root}/{path}"}
+        )
+
+    def create_folder(self, path: str, root: str = "gcodes") -> Future:
+        return self.call_method(
+            "server.files.post_directory", params={"path": f"{root}/{path}"}
+        )
+
+    def delete_folder(
+        self, path: str, root: str = "gcodes", force: bool = False
+    ) -> Future:
+        return self.call_method(
+            "server.files.delete_directory",
+            params={"path": f"{root}/{path}", "force": force},
+        )
+
+    def move_path(
+        self,
+        src_path: str,
+        dst_path: str,
+        src_root: str = "gcodes",
+        dst_root: str = "gcodes",
+    ) -> Future:
+        return self.call_method(
+            "server.files.move",
+            params={"source": f"{src_root}/{src_path}", "dest": f"{dst_root}/{dst_path}"},
+        )
+
+    def copy_path(
+        self,
+        src_path: str,
+        dst_path: str,
+        src_root: str = "gcodes",
+        dst_root: str = "gcodes",
+    ) -> Future:
+        return self.call_method(
+            "server.files.copy",
+            params={"source": f"{src_root}/{src_path}", "dest": f"{dst_root}/{dst_path}"},
+        )
+
+    ##~~ Callbacks for notifications
+
+    def on_klippy_state_change(self, notification, params):
+        if notification == "notify_klippy_ready":
+            self._logger.info("Klippy is ready!")
+            self.klipper_state = KlipperState.READY
+
+        elif notification == "notify_klippy_disconnected":
+            self._logger.warning("Klipper disconnected!")
+            self.klipper_state = KlipperState.DISCONNECTED
+
+        elif notification == "notify_klippy_shutdown":
+            self._logger.warning("Klipper shutdown, issue FIRMWARE_RESTART to restart!")
+            self.klipper_state = KlipperState.SHUTDOWN
+
+    def on_printer_update(self, _, params):
+        payload, _ = params
+        self._update_temperatures(payload)
+
+    def on_filelist_changed(self, _, params):
+        self.refresh_files()
+
+    def on_gcode_response(self, _, params):
+        self._listener.on_moonraker_gcode_log(
+            *self._to_multiline_loglines("<<<", *params)
+        )
+
+    ##~~ helpers
+
+    def _update_temperatures(self, payload):
+        dirty_actual = False
+        dirty_target = False
+
+        for heater in self._heaters:
+            if heater not in payload:
+                continue
+
+            name = (
+                heater[len(self.GENERIC_HEATER_PREFIX) :]
+                if heater.startswith(self.GENERIC_HEATER_PREFIX)
+                else heater
+            )
+
+            data = self._current_temperatures.get(name, TemperatureDataPoint())
+            if "temperature" in payload[heater]:
+                data.actual = payload[heater]["temperature"]
+                dirty_actual = True
+            if "target" in payload[heater]:
+                data.target = payload[heater]["target"]
+                dirty_target = True
+            self._current_temperatures[name] = data
+
+        if dirty_actual or dirty_target:
+            now = time.monotonic()
+            if (
+                not dirty_target
+                and self._last_temperature_update
+                and self._last_temperature_update + TEMPERATURE_INTERVAL > now
+            ):
+                return
+
+            self._listener.on_moonraker_temperature_update(self._current_temperatures)
+            self._last_temperature_update = time.monotonic()
+
+    def _to_multiline_loglines(self, prefix, *lines):
+        if len(lines) == 0:
+            return []
+        elif len(lines) == 1:
+            return [f"{prefix} {lines[0]}"]
+        else:
+            return [f"{prefix} {lines[0]}"] + [f"... {line}" for line in lines[1:]]
+
+
+if __name__ == "__main__":
+    # HOST = "127.0.0.1"
+    HOST = "q1pro.lan"
+
+    logging.basicConfig(
+        level=logging.DEBUG, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    class Listener(MoonrakerClientListener):
+        def on_moonraker_temperature_update(self, data):
+            for heater, value in data.items():
+                print(f"{heater}: {value!s}")
+            print("")
+
+    client = MoonrakerClient(HOST, listener=Listener(), daemon=False)
+    client.connect()
