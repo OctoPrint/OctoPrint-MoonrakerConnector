@@ -308,8 +308,8 @@ class ConnectedMoonrakerPrinter(
         self._client.upload_file(path_or_file, path).add_done_callback(on_upload_done)
         return path
 
-    def download_printer_file(self, path, download_callback, *args, **kwargs):
-        return super().download_printer_file(path, download_callback, *args, **kwargs)
+    def download_printer_file(self, path, *args, **kwargs):
+        return self._client.download_file(path)
 
     def delete_printer_file(self, path, *args, **kwargs):
         self._client.delete_file(path).result()
