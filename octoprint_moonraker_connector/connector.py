@@ -1,20 +1,24 @@
 import logging
+import os
+from concurrent.futures import Future
 
 from octoprint.events import Events, eventManager
+from octoprint.filemanager import FileDestinations, valid_file_type
 from octoprint.filemanager.storage import StorageCapabilities
-from octoprint.printer import PrinterFile, PrinterFilesMixin, UnknownScript
+from octoprint.printer import JobProgress, PrinterFile, PrinterFilesMixin
 from octoprint.printer.connection import (
     ConnectedPrinter,
     ConnectedPrinterState,
-    ErrorInformation,
     FirmwareInformation,
 )
+from octoprint.printer.job import PrintJob
 
 from .client import (
     FileInfo,
     KlipperState,
     MoonrakerClient,
     MoonrakerClientListener,
+    PrinterState,
     TemperatureDataPoint,
 )
 
@@ -37,6 +41,8 @@ class ConnectedMoonrakerPrinter(
         move_folder=True,
     )
 
+    can_set_job_on_hold = False
+
     @classmethod
     def connection_options(cls) -> dict:
         return {}
@@ -50,6 +56,12 @@ class ConnectedMoonrakerPrinter(
         self._event_manager = eventManager()
 
         self._host = kwargs.get("host")
+
+        # TODO: REMOVE ME!!!
+        if not self._host:
+            self._host = "q1pro.lan"
+        # END TODO
+
         try:
             self._port = int(kwargs.get("port"))
         except ValueError:
@@ -60,6 +72,8 @@ class ConnectedMoonrakerPrinter(
 
         self._state = ConnectedPrinterState.CLOSED
         self._error = None
+
+        self._progress: JobProgress = None
 
     @property
     def connection_parameters(self):
@@ -80,6 +94,10 @@ class ConnectedMoonrakerPrinter(
         message = f"State changed from {old_state.name} to {self.state.name}"
         self._logger.info(message)
         self._listener.on_printer_logs(message)
+
+    @property
+    def job_progress(self) -> JobProgress:
+        return self._progress
 
     def connect(self, *args, **kwargs):
         if self._client is not None:
@@ -102,36 +120,6 @@ class ConnectedMoonrakerPrinter(
 
     def get_error(self, *args, **kwargs):
         return self._error
-
-    def script(
-        self, name, context=None, must_be_set=True, part_of_job=False, *args, **kwargs
-    ):
-        if self._comm is None:
-            return
-
-        if name is None or not name:
-            raise ValueError("name must be set")
-
-        # .capitalize() will lowercase all letters but the first
-        # this code preserves existing CamelCase
-        event_name = name[0].upper() + name[1:]
-
-        event_start = f"GcodeScript{event_name}Running"
-        payload = context.get("event", None) if isinstance(context, dict) else None
-
-        eventManager().fire(event_start, payload)
-
-        result = self._comm.sendGcodeScript(
-            name,
-            part_of_job=part_of_job,
-            replacements=context,
-            tags=kwargs.get("tags"),
-        )
-        if not result and must_be_set:
-            raise UnknownScript(name)
-
-        event_end = f"GcodeScript{event_name}Finished"
-        eventManager().fire(event_end, payload)
 
     def jog(self, axes, relative=True, speed=None, *args, **kwargs):
         command = "G0 {}".format(
@@ -225,7 +213,53 @@ class ConnectedMoonrakerPrinter(
             and self._client.klipper_state == KlipperState.READY
         )
 
+    ##~~ Job handling
+
+    def supports_job(self, job: PrintJob) -> bool:
+        if not valid_file_type(job.path, type="machinecode"):
+            return False
+
+        if job.storage not in (FileDestinations.LOCAL, FileDestinations.PRINTER):
+            return False
+
+        if job.storage != FileDestinations.PRINTER and not os.path.isfile(
+            job.path_on_disk
+        ):
+            return False
+
+        return True
+
+    def start_print(self, pos=None, user=None, tags=None, *args, **kwargs):
+        self.state = ConnectedPrinterState.STARTING
+
+        if pos is None:
+            pos = 0
+
+        self._progress = JobProgress(
+            job=self.current_job, progress=0.0, pos=pos, elapsed=0.0, cleaned_elapsed=0.0
+        )
+
+        if self.current_job.storage == FileDestinations.PRINTER:
+            self._client.start_print(self.current_job.path).result()
+
+        else:
+            # we first need to upload this as a cache file, then start the print on that
+            pass
+
+    def pause_print(self, tags=None, *args, **kwargs):
+        self.state = ConnectedPrinterState.PAUSING
+        self._client.pause_print().result()
+
+    def resume_print(self, tags=None, *args, **kwargs):
+        self.state = ConnectedPrinterState.RESUMING
+        self._client.resume_print().result()
+
+    def cancel_print(self, tags=None, *args, **kwargs):
+        self.state = ConnectedPrinterState.CANCELLING
+        self._client.cancel_print().result()
+
     ##~~ PrinterFilesMixin
+
     @property
     def printer_files_mounted(self) -> bool:
         return self._client is not None
@@ -258,10 +292,21 @@ class ConnectedMoonrakerPrinter(
     def move_printer_folder(self, source, target, *args, **kwargs):
         self._client.move_path(source, target).result()
 
-    def upload_printer_file(self, path_or_file, path, upload_callback, *args, **kwargs):
-        return super().upload_printer_file(
-            path_or_file, path, upload_callback, *args, **kwargs
-        )
+    def upload_printer_file(
+        self, path_or_file, path, upload_callback, *args, **kwargs
+    ) -> str:
+        def on_upload_done(future: Future) -> None:
+            try:
+                future.result()
+                if callable(upload_callback):
+                    upload_callback(done=True)
+            except Exception:
+                if callable(upload_callback):
+                    upload_callback(failed=True)
+                self._logger.exception(f"Uploading to {path} failed")
+
+        self._client.upload_file(path_or_file, path).add_done_callback(on_upload_done)
+        return path
 
     def download_printer_file(self, path, download_callback, *args, **kwargs):
         return super().download_printer_file(path, download_callback, *args, **kwargs)
@@ -326,6 +371,59 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_printer_files_updated(self, files: list[FileInfo]):
         self._files = [self._to_printer_file(f) for f in files]
         self._listener.on_printer_files_refreshed(self._files)
+
+    def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:
+        if state == PrinterState.STANDBY:
+            self.state = ConnectedPrinterState.OPERATIONAL
+
+        elif state == PrinterState.PRINTING:
+            if self.state == ConnectedPrinterState.RESUMING:
+                self._listener.on_printer_job_resumed()
+            else:
+                # TODO: if no job is set yet, we need to set that now
+                self._listener.on_printer_job_started()
+            self.state = ConnectedPrinterState.PRINTING
+
+        elif state == PrinterState.PAUSED:
+            self._listener.on_printer_job_paused()
+            self.state = ConnectedPrinterState.PAUSED
+
+        elif state in (
+            PrinterState.COMPLETE,
+            PrinterState.CANCELLED,
+            PrinterState.ERROR,
+        ):
+            if state == PrinterState.COMPLETE:
+                self._progress.progress = 1.0
+                self._listener.on_printer_job_done()
+            else:
+                self._listener.on_printer_job_cancelled()
+            self.state = ConnectedPrinterState.OPERATIONAL
+
+    def on_moonraker_print_progress(
+        self,
+        progress: float = None,
+        file_position: int = None,
+        elapsed_time: float = None,
+        cleaned_time: float = None,
+    ):
+        dirty = False
+
+        if progress is not None:
+            self._progress.progress = progress
+            dirty = True
+        if file_position is not None:
+            self._progress.pos = file_position
+            dirty = True
+        if elapsed_time is not None:
+            self._progress.elapsed = elapsed_time
+            dirty = True
+        if cleaned_time is not None:
+            self._progress.cleaned_elapsed = cleaned_time
+            dirty = True
+
+        if dirty:
+            self._listener.on_printer_job_progress()
 
     ##~~ helpers
 

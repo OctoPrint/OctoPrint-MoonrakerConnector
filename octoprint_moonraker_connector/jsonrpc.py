@@ -70,8 +70,9 @@ class JsonRpcClient(websocket.WebSocketApp):
         self._daemon = daemon
         self._timeout = timeout
 
-        self._logger = logging.getLogger(__name__)
-        self._console_logger = logging.getLogger(f"{__name__}.console")
+        logger_name = "octoprint.plugins.moonraker_connector.jsonrpc"
+        self._logger = logging.getLogger(logger_name)
+        self._console_logger = logging.getLogger(f"{logger_name}.console")
 
         self._connect_future = None
 
@@ -94,7 +95,8 @@ class JsonRpcClient(websocket.WebSocketApp):
         self._connect_future = Future()
 
         self._thread = threading.Thread(
-            target=self.run_forever, name=f"JSONRPC Connection to {self.url}"
+            target=self.connection_thread_runnable,
+            name=f"JSONRPC Connection to {self.url}",
         )
         self._thread.daemon = self._daemon
         self._thread.start()
@@ -105,8 +107,15 @@ class JsonRpcClient(websocket.WebSocketApp):
         if timeout is None:
             timeout = self._timeout
 
-        future = self.connect()
-        future.result(timeout=timeout)
+        self.connect().result(timeout=timeout)
+
+    def connection_thread_runnable(self):
+        try:
+            self.run_forever()
+        except Exception as exc:
+            if self._connect_future.running:
+                self._connect_future.set_exception(exc)
+            self._logger.exception("Exception in connection runner")
 
     def disconnect(self):
         self.close()

@@ -1,10 +1,13 @@
 import enum
+import io
 import logging
+import threading
 import time
 from concurrent.futures import Future
-from typing import Any
+from typing import IO, Any, Literal, Optional, Union
 
-from octoprint.printer.connection import ConnectedPrinterState
+import requests
+
 from octoprint.schema import BaseModel
 
 from .jsonrpc import JsonRpcClient
@@ -15,6 +18,39 @@ class FileInfo(BaseModel):
     modified: float
     size: int
     permissions: str
+
+
+class PrintStatsSupplemental(BaseModel):
+    total_layer: Optional[int] = None
+    current_layer: Optional[int] = None
+
+
+class PrintStats(BaseModel):
+    filename: Optional[str] = None
+
+    total_duration: Optional[float] = None
+    """Elapsed time since start"""
+
+    print_duration: Optional[float] = None
+    """Total duration minus time until first extrusion and pauses, see https://github.com/Klipper3d/klipper/blob/9346ad1914dc50d12f1e5efe630448bf763d1469/klippy/extras/print_stats.py#L112"""
+
+    filament_used: Optional[float] = None
+
+    state: Optional[
+        Literal["standby", "printing", "paused", "complete", "error", "cancelled"]
+    ] = None
+
+    message: Optional[str] = None
+
+    info: Optional[PrintStatsSupplemental] = None
+
+
+class SDCardStats(BaseModel):
+    file_path: Optional[str] = None  # unset of no file is loaded
+    progress: Optional[float] = None  # 0.0 to 1.0
+    is_active: Optional[bool] = None
+    file_position: Optional[int] = None
+    file_size: Optional[int] = None
 
 
 class TemperatureDataPoint:
@@ -32,6 +68,39 @@ class TemperatureDataPoint:
         return f"TemperatureDataPoint({self.actual}, {self.target})"
 
 
+class KlipperState(enum.Enum):
+    READY = "ready"
+    ERROR = "error"
+    SHUTDOWN = "shutdown"
+    STARTUP = "startup"
+    DISCONNECTED = "disconnected"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def for_value(cls, value: str) -> "KlipperState":
+        for state in cls:
+            if state.value == value:
+                return state
+        return KlipperState.UNKNOWN
+
+
+class PrinterState(enum.Enum):
+    STANDBY = "standby"
+    PRINTING = "printing"
+    PAUSED = "paused"
+    COMPLETE = "complete"
+    ERROR = "error"
+    CANCELLED = "cancelled"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def for_value(cls, value: str) -> "PrinterState":
+        for state in cls:
+            if state.value == value:
+                return state
+        return cls.UNKNOWN
+
+
 class MoonrakerClientListener:
     def on_moonraker_connected(self) -> None:
         pass
@@ -39,8 +108,15 @@ class MoonrakerClientListener:
     def on_moonraker_disconnected(self, error: str = None) -> None:
         pass
 
-    def on_moonraker_state_changed(
-        self, state: ConnectedPrinterState, error: str = None
+    def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:
+        pass
+
+    def on_moonraker_print_progress(
+        self,
+        progress: Optional[float] = None,
+        file_position: Optional[int] = None,
+        elapsed_time: Optional[float] = None,
+        cleaned_time: Optional[float] = None,
     ) -> None:
         pass
 
@@ -59,22 +135,6 @@ class MoonrakerClientListener:
         pass
 
 
-class KlipperState(enum.Enum):
-    READY = "ready"
-    ERROR = "error"
-    SHUTDOWN = "shutdown"
-    STARTUP = "startup"
-    DISCONNECTED = "disconnected"
-    UNKNOWN = "unknown"
-
-    @classmethod
-    def lookup(cls, value: str) -> "KlipperState":
-        for state in cls:
-            if state.value == value:
-                return state
-        return KlipperState.UNKNOWN
-
-
 KLIPPER_STATE_ERROR_LOOKUP = {
     KlipperState.STARTUP: "Klipper is still starting up",
     KlipperState.ERROR: "Klipper experienced an error during startup",
@@ -89,6 +149,7 @@ TEMPERATURE_INTERVAL = 1.0
 
 class MoonrakerClient(JsonRpcClient):
     WEBSOCKET_URL = "ws://{host}:{port}/websocket"
+    HTTP_URL = "http://{host}:{port}"
 
     GENERIC_HEATER_PREFIX = "heater_generic "
 
@@ -114,8 +175,10 @@ class MoonrakerClient(JsonRpcClient):
     ):
         super().__init__(self.WEBSOCKET_URL.format(host=host, port=port), *args, **kwargs)
 
-        self._logger = logging.getLogger(__name__)
+        self._logger = logging.getLogger("octoprint.plugins.moonraker_connector.client")
 
+        self._host = host
+        self._port = port
         self._apikey = apikey
         self._listener = listener
         self._connection_id = None
@@ -253,7 +316,7 @@ class MoonrakerClient(JsonRpcClient):
             try:
                 server_info = future.result()
 
-                self._klipper_state = KlipperState.lookup(
+                self._klipper_state = KlipperState.for_value(
                     server_info.get("klippy_state", "unknown")
                 )
 
@@ -354,6 +417,7 @@ class MoonrakerClient(JsonRpcClient):
 
                 payload = result["status"]
                 self._update_temperatures(payload)
+                self._update_print_stats(payload)
 
             except Exception:
                 self._logger.exception("Error while querying printer objects")
@@ -448,6 +512,20 @@ class MoonrakerClient(JsonRpcClient):
         self._listener.on_moonraker_gcode_log(">>> FIRMWARE_RESTART")
         return self.call_method("printer.firmware_restart")
 
+    # print job management
+
+    def start_print(self, path: str) -> Future:
+        return self.call_method("printer.print.start", params={"filename": path})
+
+    def pause_print(self) -> Future:
+        return self.call_method("printer.print.pause")
+
+    def resume_print(self) -> Future:
+        return self.call_method("printer.print.resume")
+
+    def cancel_print(self) -> Future:
+        return self.call_method("printer.print.cancel")
+
     # file management
 
     def refresh_files(self, root="gcodes") -> Future:
@@ -463,11 +541,73 @@ class MoonrakerClient(JsonRpcClient):
         future.add_done_callback(on_result)
         return future
 
-    def upload_file(self, path: str, root: str = "gcodes", *args, **kwargs) -> Future:
-        pass
+    def upload_file(
+        self,
+        source: Union[str, IO],
+        path: str,
+        root: str = "gcodes",
+        close_on_eof: bool = True,
+        *args,
+        **kwargs,
+    ) -> Future:
+        folder = ""
+        filename = path
+
+        future = Future()
+
+        parts = path.split("/")
+        if len(parts) > 1:
+            folder = "/".join(parts[:-1])
+            filename = parts[-1]
+
+        def upload(
+            folder: str, filename: str, handle: Union[str, IO], close_on_eof: bool = True
+        ):
+            try:
+                if isinstance(handle, str):
+                    close_on_eof = True
+                    source = open(handle, "rb")
+
+                headers = {}
+                if self._apikey:
+                    headers["X-Api-Key"] = self._apikey
+
+                url = (
+                    self.HTTP_URL.format(host=self._host, port=self._port)
+                    + "/server/files/upload"
+                )
+
+                response = requests.post(
+                    url,
+                    headers=headers,
+                    files={"file": (filename, source)},
+                    data={"root": root, "path": folder},
+                )
+                response.raise_for_status()
+
+                future.set_result(response.json())
+
+            except Exception as exc:
+                self._logger.exception(f"Error while uploading to {root}/{path}")
+                future.set_exception(exc)
+
+            finally:
+                if isinstance(handle, io.IOBase) and close_on_eof:
+                    handle.close()
+
+        threading.Thread(
+            name="Moonraker upload worker",
+            target=upload,
+            args=(folder, filename, source),
+            kwargs={"close_on_eof": close_on_eof},
+            daemon=True,
+        ).start()
+        return future
 
     def download_file(self, path: str, root: str = "gcodes") -> Future:
-        pass
+        future = Future()
+
+        return future
 
     def delete_file(self, path: str, root: str = "gcodes") -> Future:
         return self.call_method(
@@ -529,6 +669,7 @@ class MoonrakerClient(JsonRpcClient):
     def on_printer_update(self, _, params):
         payload, _ = params
         self._update_temperatures(payload)
+        self._update_print_stats(payload)
 
     def on_filelist_changed(self, _, params):
         self.refresh_files()
@@ -575,7 +716,37 @@ class MoonrakerClient(JsonRpcClient):
             self._listener.on_moonraker_temperature_update(self._current_temperatures)
             self._last_temperature_update = time.monotonic()
 
-    def _to_multiline_loglines(self, prefix, *lines):
+    def _update_print_stats(self, payload: dict[str, Any]) -> None:
+        if "print_stats" not in payload:
+            return
+
+        print_stats = PrintStats(**payload["print_stats"])
+
+        if print_stats.state is not None:
+            printer_state = PrinterState.for_value(print_stats.state)
+            self._listener.on_moonraker_printer_state_changed(printer_state)
+
+        if (
+            print_stats.total_duration is not None
+            or print_stats.print_duration is not None
+        ):
+            self._listener.on_moonraker_print_progress(
+                elapsed_time=print_stats.total_duration,
+                cleaned_time=print_stats.print_duration,
+            )
+
+    def _update_virtual_sdcard(self, payload: dict[str, Any]) -> None:
+        if "virtual_sdcard" not in payload:
+            return
+
+        sdcard_state = SDCardStats(**payload["virtual_sdcard"])
+
+        if sdcard_state.progress is not None or sdcard_state.file_position is not None:
+            self._listener.on_moonraker_print_progress(
+                progress=sdcard_state.progress, file_position=sdcard_state.file_position
+            )
+
+    def _to_multiline_loglines(self, prefix, *lines) -> list[str]:
         if len(lines) == 0:
             return []
         elif len(lines) == 1:
