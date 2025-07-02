@@ -1,5 +1,4 @@
 import logging
-import os
 from concurrent.futures import Future
 
 from octoprint.events import Events, eventManager
@@ -52,8 +51,11 @@ class ConnectedMoonrakerPrinter(
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        from octoprint.server import fileManager
+
         self._logger = logging.getLogger(__name__)
         self._event_manager = eventManager()
+        self._file_manager = fileManager
 
         self._host = kwargs.get("host")
 
@@ -74,6 +76,7 @@ class ConnectedMoonrakerPrinter(
         self._error = None
 
         self._progress: JobProgress = None
+        self._job_cache: str = None
 
     @property
     def connection_parameters(self):
@@ -219,32 +222,67 @@ class ConnectedMoonrakerPrinter(
         if not valid_file_type(job.path, type="machinecode"):
             return False
 
-        if job.storage not in (FileDestinations.LOCAL, FileDestinations.PRINTER):
-            return False
-
-        if job.storage != FileDestinations.PRINTER and not os.path.isfile(
-            job.path_on_disk
+        if (
+            job.storage != FileDestinations.PRINTER
+            and not self._file_manager.capabilities(job.storage).read_file
         ):
             return False
 
         return True
 
     def start_print(self, pos=None, user=None, tags=None, *args, **kwargs):
-        self.state = ConnectedPrinterState.STARTING
-
         if pos is None:
             pos = 0
 
+        self.state = ConnectedPrinterState.STARTING
         self._progress = JobProgress(
             job=self.current_job, progress=0.0, pos=pos, elapsed=0.0, cleaned_elapsed=0.0
         )
 
-        if self.current_job.storage == FileDestinations.PRINTER:
-            self._client.start_print(self.current_job.path).result()
+        try:
+            if self.current_job.storage == FileDestinations.PRINTER:
+                self._client.start_print(self.current_job.path).result()
 
-        else:
-            # we first need to upload this as a cache file, then start the print on that
-            pass
+            else:
+                # we first need to upload this as a cache file, then start the print on that
+
+                if self._job_cache:
+                    # if we still have a job cache file, delete it now
+                    for f in self._job_cache:
+                        self._client.delete_file(f)
+                    self._job_cache = []
+
+                _, filename = self._file_manager.split_path(
+                    self.current_job.storage, self.current_job.path
+                )
+                job_cache = f".octoprint/{filename}"
+                print_future = Future()
+
+                def handle_uploaded(future: Future) -> None:
+                    try:
+                        future.result()
+
+                        self._client.start_print(job_cache).result()
+
+                        print_future.set_result(True)
+
+                    except Exception as exc:
+                        print_future.set_exception(exc)
+
+                handle = self._file_manager.read_file(
+                    self.current_job.storage, self.current_job.path
+                )
+                self._client.upload_file(handle, job_cache).add_done_callback(
+                    handle_uploaded
+                )
+                print_future.result()
+
+        except Exception:
+            self._logger.exception(
+                f"Error while starting print job of {self.current_job.storage}:{self.current_job.path}"
+            )
+            self._listener.on_printer_job_cancelled()
+            self.state = ConnectedPrinterState.OPERATIONAL
 
     def pause_print(self, tags=None, *args, **kwargs):
         self.state = ConnectedPrinterState.PAUSING
@@ -370,6 +408,11 @@ class ConnectedMoonrakerPrinter(
 
     def on_moonraker_printer_files_updated(self, files: list[FileInfo]):
         self._files = [self._to_printer_file(f) for f in files]
+
+        self._job_cache = [
+            f.path for f in self._files if f.path.startswith(".octoprint/")
+        ]
+
         self._listener.on_printer_files_refreshed(self._files)
 
     def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:

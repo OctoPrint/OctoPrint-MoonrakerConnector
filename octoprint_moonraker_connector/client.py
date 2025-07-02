@@ -566,7 +566,7 @@ class MoonrakerClient(JsonRpcClient):
             try:
                 if isinstance(handle, str):
                     close_on_eof = True
-                    source = open(handle, "rb")
+                    handle = open(handle, "rb")
 
                 headers = {}
                 if self._apikey:
@@ -580,12 +580,12 @@ class MoonrakerClient(JsonRpcClient):
                 response = requests.post(
                     url,
                     headers=headers,
-                    files={"file": (filename, source)},
+                    files={"file": (filename, handle)},
                     data={"root": root, "path": folder},
                 )
                 response.raise_for_status()
 
-                future.set_result(response.json())
+                future.set_result(True)
 
             except Exception as exc:
                 self._logger.exception(f"Error while uploading to {root}/{path}")
