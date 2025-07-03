@@ -91,7 +91,7 @@ class JsonRpcClient(websocket.WebSocketApp):
         )
 
     def connect(self) -> Future:
-        self._logger.info(f"Connecting to {self.url}...")
+        self._dual_log(logging.INFO, f"Connecting to {self.url}...")
         self._connect_future = Future()
 
         self._thread = threading.Thread(

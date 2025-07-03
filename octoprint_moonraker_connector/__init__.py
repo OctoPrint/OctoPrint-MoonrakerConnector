@@ -3,6 +3,11 @@ import logging
 from flask_babel import gettext
 
 import octoprint.plugin
+from octoprint.logging.handlers import TriggeredRolloverLogHandler
+
+
+class MoonrakerJsonRpcLogHandler(TriggeredRolloverLogHandler):
+    pass
 
 
 class MoonrakerConnectorPlugin(
@@ -12,22 +17,27 @@ class MoonrakerConnectorPlugin(
     octoprint.plugin.StartupPlugin,
 ):
     def initialize(self):
-        self._jsonrpc_logger = logging.getLogger(
-            "octoprint.plugins.moonraker_connector.jsonrpc.console"
-        )
+        self._jsonrpc_logging_handler = None
 
     def on_startup(self, host, port):
-        jsonrpc_logging_handler = logging.handlers.RotatingFileHandler(
-            self._settings.get_plugin_logfile_path(postfix="jsonrpc"),
-            maxBytes=2 * 1024 * 1024,
-            encoding="utf-8",
-        )
-        jsonrpc_logging_handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-        jsonrpc_logging_handler.setLevel(logging.DEBUG)
+        self._configure_json_rpc_logging()
 
-        self._jsonrpc_logger.addHandler(jsonrpc_logging_handler)
-        self._jsonrpc_logger.setLevel(logging.DEBUG)
-        self._jsonrpc_logger.propagate = False
+    def _configure_json_rpc_logging(self):
+        handler = MoonrakerJsonRpcLogHandler(
+            self._settings.get_plugin_logfile_path(postfix="jsonrpc"),
+            encoding="utf-8",
+            backupCount=3,
+            delay=True,
+        )
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        handler.setLevel(logging.DEBUG)
+
+        logger = logging.getLogger(
+            "octoprint.plugins.moonraker_connector.jsonrpc.console"
+        )
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
 
     ##~~ TemplatePlugin mixin
 

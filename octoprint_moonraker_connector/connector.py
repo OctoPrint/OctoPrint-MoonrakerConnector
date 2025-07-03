@@ -110,8 +110,12 @@ class ConnectedMoonrakerPrinter(
         return self._progress
 
     def connect(self, *args, **kwargs):
+        from . import MoonrakerJsonRpcLogHandler
+
         if self._client is not None:
             return
+
+        MoonrakerJsonRpcLogHandler.arm_rollover()
 
         self.state = ConnectedPrinterState.CONNECTING
         self._client = MoonrakerClient(
