@@ -46,11 +46,22 @@ class PrintStats(BaseModel):
 
 
 class SDCardStats(BaseModel):
-    file_path: Optional[str] = None  # unset of no file is loaded
+    file_path: Optional[str] = (
+        None  # unset if no file is loaded, path is the path on the file system
+    )
     progress: Optional[float] = None  # 0.0 to 1.0
-    is_active: Optional[bool] = None
+    is_active: Optional[bool] = None  # True if a print is ongoing
     file_position: Optional[int] = None
     file_size: Optional[int] = None
+
+
+class IdleTimeout(BaseModel):
+    state: Optional[Literal["Printing", "Ready", "Idle"]] = (
+        None  # "Printing" means some commands are being executed!
+    )
+    printing_time: Optional[float] = (
+        None  # Duration of "Printing" state, resets on state change to "Ready"
+    )
 
 
 class TemperatureDataPoint:
@@ -101,6 +112,20 @@ class PrinterState(enum.Enum):
         return cls.UNKNOWN
 
 
+class IdleState(enum.Enum):
+    PRINTING = "Printing"
+    READY = "Ready"
+    IDLE = "Idle"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def for_value(cls, value: str) -> "IdleState":
+        for state in cls:
+            if state.value == value:
+                return state
+        return cls.UNKNOWN
+
+
 class MoonrakerClientListener:
     def on_moonraker_connected(self) -> None:
         pass
@@ -120,6 +145,12 @@ class MoonrakerClientListener:
     ) -> None:
         pass
 
+    def on_moonraker_print_detected(
+        self,
+        path: str,
+    ) -> None:
+        pass
+
     def on_moonraker_server_info(self, server_info: dict[str, Any]) -> None:
         pass
 
@@ -129,6 +160,9 @@ class MoonrakerClientListener:
     def on_moonraker_temperature_update(
         self, data: dict[str, TemperatureDataPoint]
     ) -> None:
+        pass
+
+    def on_moonraker_idle_state(self, state: IdleState) -> None:
         pass
 
     def on_moonraker_gcode_log(self, *line: str) -> None:
@@ -146,6 +180,8 @@ MAX_HANDSHAKE_ATTEMPTS = 5
 
 TEMPERATURE_INTERVAL = 1.0
 
+MONITORED_FILE_ROOTS = "gcodes"
+
 
 class MoonrakerClient(JsonRpcClient):
     WEBSOCKET_URL = "ws://{host}:{port}/websocket"
@@ -157,6 +193,7 @@ class MoonrakerClient(JsonRpcClient):
         "display_status",
         "extruder",
         "heater_bed",
+        "idle_timeout",
         "print_stats",
         "virtual_sdcard",
         lambda obj_list: [
@@ -185,6 +222,7 @@ class MoonrakerClient(JsonRpcClient):
 
         self._klipper_state: KlipperState = KlipperState.UNKNOWN
         self._klipper_state_subscription = False
+        self._obj_subs: list[str] = []
 
         self._log_history_received = False
 
@@ -372,6 +410,7 @@ class MoonrakerClient(JsonRpcClient):
                         obj_subs += matched
 
                 if obj_subs:
+                    self._obj_subs = obj_subs
                     self._heaters = [
                         x
                         for x in obj_subs
@@ -404,7 +443,10 @@ class MoonrakerClient(JsonRpcClient):
 
     ##~~ Method calls & callbacks
 
-    def query_printer_objects(self, objs: list[str]) -> Future:
+    def query_printer_objects(self, objs: list[str] = None) -> Future:
+        if objs is None:
+            objs = self._obj_subs
+
         def on_result(future: Future) -> None:
             try:
                 result = future.result()
@@ -416,8 +458,7 @@ class MoonrakerClient(JsonRpcClient):
                     return
 
                 payload = result["status"]
-                self._update_temperatures(payload)
-                self._update_print_stats(payload)
+                self._process_update(payload)
 
             except Exception:
                 self._logger.exception("Error while querying printer objects")
@@ -427,9 +468,39 @@ class MoonrakerClient(JsonRpcClient):
         future.add_done_callback(on_result)
         return future
 
-    def subscribe_printer_objects(self, objs: list[str]) -> Future:
+    def subscribe_printer_objects(self, objs: list[str] = None) -> Future:
+        if objs is None:
+            objs = self._obj_subs
+
         params = {"objects": dict.fromkeys(objs)}
         return self.call_method("printer.objects.subscribe", params=params)
+
+    def query_print_status(self) -> Future[tuple[PrintStats, SDCardStats]]:
+        result_future = Future()
+
+        def on_status(future: Future) -> None:
+            try:
+                result = future.result()
+                payload = result.get("status")
+                if payload is None:
+                    raise ValueError("Response is missing status field")
+
+                if "print_stats" not in payload or "virtual_sdcard" not in payload:
+                    raise ValueError(
+                        "Response is missing print_stats or virtual_sdcard fields"
+                    )
+
+                print_stats = PrintStats(**payload["print_stats"])
+                virtual_sdcard = SDCardStats(**payload["virtual_sdcard"])
+
+                result_future.set_result((print_stats, virtual_sdcard))
+            except Exception as exc:
+                result_future.set_exception(exc)
+
+        self.query_printer_objects(["print_stats", "virtual_sdcard"]).add_done_callback(
+            on_status
+        )
+        return result_future
 
     def fetch_console_history(self, count: int = 100, force: bool = False) -> Future:
         if self._log_history_received and not force:
@@ -678,11 +749,16 @@ class MoonrakerClient(JsonRpcClient):
 
     def on_printer_update(self, _, params):
         payload, _ = params
-        self._update_temperatures(payload)
-        self._update_print_stats(payload)
+        self._process_update(payload)
 
     def on_filelist_changed(self, _, params):
-        self.refresh_files()
+        assert isinstance(params, list)
+
+        roots = [item.get("item", {}).get("root") for item in params]
+        monitored_roots = [root for root in roots if root in MONITORED_FILE_ROOTS]
+
+        for root in monitored_roots:
+            self.refresh_files(root=root)
 
     def on_gcode_response(self, _, params):
         self._listener.on_moonraker_gcode_log(
@@ -691,7 +767,13 @@ class MoonrakerClient(JsonRpcClient):
 
     ##~~ helpers
 
-    def _update_temperatures(self, payload):
+    def _process_update(self, payload: dict[str, Any]) -> None:
+        self._update_idle_timeout(payload)
+        self._update_print_stats(payload)
+        self._update_temperatures(payload)
+        self._update_virtual_sdcard(payload)
+
+    def _update_temperatures(self, payload: dict[str, Any]) -> None:
         dirty_actual = False
         dirty_target = False
 
@@ -755,6 +837,16 @@ class MoonrakerClient(JsonRpcClient):
             self._listener.on_moonraker_print_progress(
                 progress=sdcard_state.progress, file_position=sdcard_state.file_position
             )
+
+    def _update_idle_timeout(self, payload: dict[str, Any]) -> None:
+        if "idle_timeout" not in payload:
+            return
+
+        idle_timeout = IdleTimeout(**payload["idle_timeout"])
+
+        if idle_timeout.state is not None:
+            state = IdleState.for_value(idle_timeout.state)
+            self._listener.on_moonraker_idle_state(state)
 
     def _to_multiline_loglines(self, prefix, *lines) -> list[str]:
         if len(lines) == 0:

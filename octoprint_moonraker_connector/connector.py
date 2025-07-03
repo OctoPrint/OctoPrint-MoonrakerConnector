@@ -1,5 +1,6 @@
 import logging
 from concurrent.futures import Future
+from typing import cast
 
 from octoprint.events import Events, eventManager
 from octoprint.filemanager import FileDestinations, valid_file_type
@@ -14,10 +15,13 @@ from octoprint.printer.job import PrintJob
 
 from .client import (
     FileInfo,
+    IdleState,
     KlipperState,
     MoonrakerClient,
     MoonrakerClientListener,
     PrinterState,
+    PrintStats,
+    SDCardStats,
     TemperatureDataPoint,
 )
 
@@ -77,6 +81,9 @@ class ConnectedMoonrakerPrinter(
 
         self._progress: JobProgress = None
         self._job_cache: str = None
+
+        self._printer_state: PrinterState = IdleState.UNKNOWN
+        self._idle_state: IdleState = IdleState.UNKNOWN
 
     @property
     def connection_parameters(self):
@@ -416,20 +423,58 @@ class ConnectedMoonrakerPrinter(
         self._listener.on_printer_files_refreshed(self._files)
 
     def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:
+        self._printer_state = state
+
         if state == PrinterState.STANDBY:
             self.state = ConnectedPrinterState.OPERATIONAL
 
         elif state == PrinterState.PRINTING:
-            if self.state == ConnectedPrinterState.RESUMING:
-                self._listener.on_printer_job_resumed()
-            else:
-                # TODO: if no job is set yet, we need to set that now
-                self._listener.on_printer_job_started()
-            self.state = ConnectedPrinterState.PRINTING
+            if self.state not in (
+                ConnectedPrinterState.STARTING,
+                ConnectedPrinterState.PAUSING,
+                ConnectedPrinterState.PAUSED,
+                ConnectedPrinterState.RESUMING,
+                ConnectedPrinterState.PRINTING,
+            ):
+                # externally triggered print job, let's see what's being printed
+                def on_status(future: Future[tuple[PrintStats, SDCardStats]]) -> None:
+                    try:
+                        print_stats, virtual_sdcard = cast(
+                            tuple[PrintStats, SDCardStats], future.result()
+                        )
+
+                        path = print_stats.filename
+                        size = virtual_sdcard.file_size
+
+                        if path is None or size is None:
+                            raise ValueError("Missing path or size")
+
+                        job = PrintJob(storage="printer", path=path, size=size)
+
+                    except Exception:
+                        self._logger.exception(
+                            "Error while querying status, setting unknown job"
+                        )
+
+                        job = PrintJob(storage="printer", path="???")
+
+                    self.set_job(job)
+                    self._listener.on_printer_job_changed(job)
+
+                    self.state = ConnectedPrinterState.PRINTING
+
+                self._client.query_print_status().add_done_callback(on_status)
+
+            elif self.state != ConnectedPrinterState.PRINTING:
+                if self.state in (
+                    ConnectedPrinterState.PAUSING,
+                    ConnectedPrinterState.PAUSED,
+                ):
+                    self.state = ConnectedPrinterState.RESUMING
+                self._evaluate_actual_status()
 
         elif state == PrinterState.PAUSED:
-            self._listener.on_printer_job_paused()
-            self.state = ConnectedPrinterState.PAUSED
+            self._evaluate_actual_status()
 
         elif state in (
             PrinterState.COMPLETE,
@@ -437,11 +482,10 @@ class ConnectedMoonrakerPrinter(
             PrinterState.ERROR,
         ):
             if state == PrinterState.COMPLETE:
-                self._progress.progress = 1.0
-                self._listener.on_printer_job_done()
+                self.state = ConnectedPrinterState.FINISHING
             else:
-                self._listener.on_printer_job_cancelled()
-            self.state = ConnectedPrinterState.OPERATIONAL
+                self.state = ConnectedPrinterState.CANCELLING
+            self._evaluate_actual_status()
 
     def on_moonraker_print_progress(
         self,
@@ -450,6 +494,15 @@ class ConnectedMoonrakerPrinter(
         elapsed_time: float = None,
         cleaned_time: float = None,
     ):
+        if self._progress is None and self.current_job is not None:
+            self._progress = JobProgress(
+                job=self.current_job,
+                progress=0.0,
+                pos=0,
+                elapsed=0.0,
+                cleaned_elapsed=0.0,
+            )
+
         dirty = False
 
         if progress is not None:
@@ -468,7 +521,62 @@ class ConnectedMoonrakerPrinter(
         if dirty:
             self._listener.on_printer_job_progress()
 
+    def on_moonraker_idle_state(self, state: IdleState):
+        self._idle_state = state
+        self._evaluate_actual_status()
+
     ##~~ helpers
+
+    def _evaluate_actual_status(self):
+        if self.state in (
+            ConnectedPrinterState.STARTING,
+            ConnectedPrinterState.RESUMING,
+        ):
+            if self._printer_state != PrinterState.PRINTING:
+                # not yet printing
+                return
+
+            if self.state == ConnectedPrinterState.STARTING:
+                self._listener.on_printer_job_started()
+            else:
+                self._listener.on_printer_job_resumed()
+            self.state = ConnectedPrinterState.PRINTING
+
+        elif self.state in (
+            ConnectedPrinterState.FINISHING,
+            ConnectedPrinterState.CANCELLING,
+            ConnectedPrinterState.PAUSING,
+        ):
+            if self._idle_state == IdleState.PRINTING:
+                # still printing
+                return
+
+            if (
+                self.state == ConnectedPrinterState.FINISHING
+                and self._printer_state == PrinterState.COMPLETE
+            ):
+                # print done
+                self._progress.progress = 1.0
+                self._listener.on_printer_job_done()
+                self.state = ConnectedPrinterState.OPERATIONAL
+            elif (
+                self.state == ConnectedPrinterState.CANCELLING
+                and self._printer_state
+                in (
+                    PrinterState.CANCELLED,
+                    PrinterState.ERROR,
+                )
+            ):
+                # print failed
+                self._listener.on_printer_job_cancelled()
+                self.state = ConnectedPrinterState.OPERATIONAL
+            elif (
+                self.state == ConnectedPrinterState.PAUSING
+                and self._printer_state == PrinterState.PAUSED
+            ):
+                # print paused
+                self._listener.on_printer_job_paused()
+                self.state = ConnectedPrinterState.PAUSED
 
     def _to_printer_file(self, info: FileInfo) -> PrinterFile:
         parts = info.path.split("/")
