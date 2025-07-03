@@ -14,6 +14,7 @@ from octoprint.printer.connection import (
 from octoprint.printer.job import PrintJob
 
 from .client import (
+    Coordinate,
     FileInfo,
     IdleState,
     KlipperState,
@@ -55,11 +56,14 @@ class ConnectedMoonrakerPrinter(
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        from octoprint.server import fileManager
+        from octoprint.server import fileManager, pluginManager
+        from octoprint.settings import settings
 
         self._logger = logging.getLogger(__name__)
         self._event_manager = eventManager()
         self._file_manager = fileManager
+        self._plugin_manager = pluginManager
+        self._settings = settings()
 
         self._host = kwargs.get("host")
 
@@ -84,6 +88,7 @@ class ConnectedMoonrakerPrinter(
 
         self._printer_state: PrinterState = IdleState.UNKNOWN
         self._idle_state: IdleState = IdleState.UNKNOWN
+        self._position: Coordinate = None
 
     @property
     def connection_parameters(self):
@@ -429,10 +434,7 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:
         self._printer_state = state
 
-        if state == PrinterState.STANDBY:
-            self.state = ConnectedPrinterState.OPERATIONAL
-
-        elif state == PrinterState.PRINTING:
+        if state == PrinterState.PRINTING:
             if self.state not in (
                 ConnectedPrinterState.STARTING,
                 ConnectedPrinterState.PAUSING,
@@ -491,6 +493,9 @@ class ConnectedMoonrakerPrinter(
                 self.state = ConnectedPrinterState.CANCELLING
             self._evaluate_actual_status()
 
+        elif state == PrinterState.STANDBY:
+            self._evaluate_actual_status()
+
     def on_moonraker_print_progress(
         self,
         progress: float = None,
@@ -529,6 +534,67 @@ class ConnectedMoonrakerPrinter(
         self._idle_state = state
         self._evaluate_actual_status()
 
+    def on_moonraker_action_command(
+        self, line: str, action: str, params: str = None
+    ) -> None:
+        if action == "start":
+            if self.get_current_job():
+                self.start_print()
+
+        elif action == "cancel":
+            self.cancel_print()
+
+        elif action == "pause":
+            self.pause_print()
+
+        elif action == "paused":
+            # already handled differently
+            pass
+
+        elif action == "resume":
+            self.resume_print()
+
+        elif action == "resumed":
+            # already handled differently
+            pass
+
+        elif action == "disconnect":
+            self.disconnect()
+
+        elif action in ("sd_inserted", "sd_updated"):
+            self.refresh_printer_files()
+
+        elif action == "shutdown":
+            if self._settings.getBoolean(["serial", "enableShutdownActionCommand"]):
+                from octoprint.server import system_command_manager
+
+                try:
+                    system_command_manager.perform_system_shutdown()
+                except Exception as ex:
+                    self._logger.error(f"Error executing system shutdown: {ex}")
+            else:
+                self._logger.warning(
+                    "Received a shutdown command from the printer, but processing of this command is disabled"
+                )
+
+        action_command = action + f" {params}" if params else ""
+        for name, hook in self._plugin_manager.get_hooks(
+            "octoprint.comm.protocol.action"
+        ).items():
+            try:
+                hook(self, line, action_command, name=action, params=params)
+            except Exception:
+                self._logger.exception(
+                    f"Error while calling hook from plugin {name} with action command {action_command}",
+                    extra={"plugin": name},
+                )
+
+    def on_moonraker_position_update(self, position: Coordinate):
+        prev = self._position
+        if prev and prev.z != position.z:
+            self._event_manager.fire(Events.Z_CHANGE, {"new": position.z, "old": prev.z})
+        self._position = position
+
     ##~~ helpers
 
     def _evaluate_actual_status(self):
@@ -555,9 +621,9 @@ class ConnectedMoonrakerPrinter(
                 # still printing
                 return
 
-            if (
-                self.state == ConnectedPrinterState.FINISHING
-                and self._printer_state == PrinterState.COMPLETE
+            if self.state == ConnectedPrinterState.FINISHING and self._printer_state in (
+                PrinterState.COMPLETE,
+                PrinterState.STANDBY,
             ):
                 # print done
                 self._progress.progress = 1.0
@@ -566,10 +632,7 @@ class ConnectedMoonrakerPrinter(
             elif (
                 self.state == ConnectedPrinterState.CANCELLING
                 and self._printer_state
-                in (
-                    PrinterState.CANCELLED,
-                    PrinterState.ERROR,
-                )
+                in (PrinterState.CANCELLED, PrinterState.ERROR, PrinterState.STANDBY)
             ):
                 # print failed
                 self._listener.on_printer_job_cancelled()

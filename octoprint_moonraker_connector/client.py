@@ -3,6 +3,7 @@ import io
 import logging
 import threading
 import time
+from collections import namedtuple
 from concurrent.futures import Future
 from typing import IO, Any, Literal, Optional, Union
 
@@ -62,6 +63,20 @@ class IdleTimeout(BaseModel):
     printing_time: Optional[float] = (
         None  # Duration of "Printing" state, resets on state change to "Ready"
     )
+
+
+Coordinate = namedtuple("Coordinate", "x, y, z, e")
+
+
+class PositionData(BaseModel):
+    speed_factor: Optional[float] = None
+    speed: Optional[float] = None
+    extruder_factor: Optional[float] = None
+    absolute_coordinates: Optional[bool] = None
+    absolute_extrude: Optional[bool] = None
+    homing_origins: Optional[Coordinate] = None  # offsets
+    position: Optional[Coordinate] = None  # current w/ offsets
+    gcode_position: Optional[Coordinate] = None  # current w/o offsets
 
 
 class TemperatureDataPoint:
@@ -168,6 +183,14 @@ class MoonrakerClientListener:
     def on_moonraker_gcode_log(self, *line: str) -> None:
         pass
 
+    def on_moonraker_action_command(
+        self, line: str, action: str, params: str = None
+    ) -> None:
+        pass
+
+    def on_moonraker_position_update(self, position: Coordinate) -> None:
+        pass
+
 
 KLIPPER_STATE_ERROR_LOOKUP = {
     KlipperState.STARTUP: "Klipper is still starting up",
@@ -182,6 +205,8 @@ TEMPERATURE_INTERVAL = 1.0
 
 MONITORED_FILE_ROOTS = "gcodes"
 
+ACTION_PREFIX = "// action:"
+
 
 class MoonrakerClient(JsonRpcClient):
     WEBSOCKET_URL = "ws://{host}:{port}/websocket"
@@ -192,6 +217,7 @@ class MoonrakerClient(JsonRpcClient):
     RELEVANT_PRINTER_OBJECTS = (
         "display_status",
         "extruder",
+        "gcode_move",
         "heater_bed",
         "idle_timeout",
         "print_stats",
@@ -765,9 +791,24 @@ class MoonrakerClient(JsonRpcClient):
             *self._to_multiline_loglines("<<<", *params)
         )
 
+        for line in params:
+            if line.startswith(ACTION_PREFIX):
+                action_command = line[len(ACTION_PREFIX) :].strip()
+                if " " in action_command:
+                    action_name, action_params = action_command.split(" ", 1)
+                    action_name = action_name.strip()
+                else:
+                    action_name = action_command
+                    action_params = ""
+
+                self._listener.on_moonraker_action_command(
+                    line, action_name, params=action_params
+                )
+
     ##~~ helpers
 
     def _process_update(self, payload: dict[str, Any]) -> None:
+        self._update_gcode_move(payload)
         self._update_idle_timeout(payload)
         self._update_print_stats(payload)
         self._update_temperatures(payload)
@@ -847,6 +888,15 @@ class MoonrakerClient(JsonRpcClient):
         if idle_timeout.state is not None:
             state = IdleState.for_value(idle_timeout.state)
             self._listener.on_moonraker_idle_state(state)
+
+    def _update_gcode_move(self, payload: dict[str, Any]) -> None:
+        if "gcode_move" not in payload:
+            return
+
+        position = PositionData(**payload["gcode_move"])
+
+        if position.gcode_position is not None:
+            self._listener.on_moonraker_position_update(position.gcode_position)
 
     def _to_multiline_loglines(self, prefix, *lines) -> list[str]:
         if len(lines) == 0:
