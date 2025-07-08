@@ -17,6 +17,13 @@ class MoonrakerConnectorPlugin(
     octoprint.plugin.StartupPlugin,
 ):
     def initialize(self):
+        from .connector import ConnectedMoonrakerPrinter  # noqa: F401
+
+        ConnectedMoonrakerPrinter._event_bus = self._event_bus
+        ConnectedMoonrakerPrinter._file_manager = self._file_manager
+        ConnectedMoonrakerPrinter._plugin_manager = self._plugin_manager
+        ConnectedMoonrakerPrinter._plugin_settings = self._settings
+
         self._jsonrpc_logging_handler = None
 
     def on_startup(self, host, port):
@@ -39,6 +46,13 @@ class MoonrakerConnectorPlugin(
         logger.setLevel(logging.DEBUG)
         logger.propagate = False
 
+    ##~~ SettingsPlugin mixin
+
+    def get_settings_defaults(self):
+        return {
+            "emergency_stop_on_cancel": False,
+        }
+
     ##~~ TemplatePlugin mixin
 
     def get_template_configs(self):
@@ -59,7 +73,3 @@ __plugin_description__ = "A printer connector plugin to support communication wi
 __plugin_license__ = "AGPLv3"
 __plugin_pythoncompat__ = ">=3.9,<4"
 __plugin_implementation__ = MoonrakerConnectorPlugin()
-
-
-def __plugin_load__():
-    from .connector import ConnectedMoonrakerPrinter  # noqa: F401

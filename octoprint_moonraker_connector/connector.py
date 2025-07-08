@@ -1,8 +1,8 @@
 import logging
 from concurrent.futures import Future
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
-from octoprint.events import Events, eventManager
+from octoprint.events import Events
 from octoprint.filemanager import FileDestinations, valid_file_type
 from octoprint.filemanager.storage import StorageCapabilities
 from octoprint.printer import JobProgress, PrinterFile, PrinterFilesMixin
@@ -26,12 +26,24 @@ from .client import (
     TemperatureDataPoint,
 )
 
+if TYPE_CHECKING:
+    from octoprint.events import EventManager
+    from octoprint.filemanager import FileManager
+    from octoprint.plugin import PluginManager, PluginSettings
+
 
 class ConnectedMoonrakerPrinter(
     ConnectedPrinter, PrinterFilesMixin, MoonrakerClientListener
 ):
     connector = "moonraker"
     name = "Klipper (Moonraker)"
+
+    # injected by our plugin
+    _event_bus: "EventManager" = None
+    _file_manager: "FileManager" = None
+    _plugin_manager: "PluginManager" = None
+    _plugin_settings: "PluginSettings" = None
+    # /injected
 
     storage_capabilities = StorageCapabilities(
         write_file=True,
@@ -56,14 +68,7 @@ class ConnectedMoonrakerPrinter(
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        from octoprint.server import fileManager, pluginManager
-        from octoprint.settings import settings
-
         self._logger = logging.getLogger(__name__)
-        self._event_manager = eventManager()
-        self._file_manager = fileManager
-        self._plugin_manager = pluginManager
-        self._settings = settings()
 
         self._host = kwargs.get("host")
 
@@ -131,7 +136,7 @@ class ConnectedMoonrakerPrinter(
     def disconnect(self, *args, **kwargs):
         if self._client is None:
             return
-        eventManager().fire(Events.DISCONNECTING)
+        self._event_bus.fire(Events.DISCONNECTING)
         self._client.disconnect()
 
     def emergency_stop(self, *args, **kwargs):
@@ -310,7 +315,11 @@ class ConnectedMoonrakerPrinter(
 
     def cancel_print(self, tags=None, *args, **kwargs):
         self.state = ConnectedPrinterState.CANCELLING
-        self._client.cancel_print().result()
+        if self._plugin_settings.get_boolean(["emergency_stop_on_cancel"]):
+            self._client.trigger_emergency_stop().result()
+            self._client.send_gcode_commands("FIRMWARE_RESTART")
+        else:
+            self._client.cancel_print().result()
 
     ##~~ PrinterFilesMixin
 
@@ -378,7 +387,7 @@ class ConnectedMoonrakerPrinter(
 
     def on_moonraker_connected(self):
         self.state = ConnectedPrinterState.OPERATIONAL
-        eventManager().fire(
+        self._event_bus.fire(
             Events.CONNECTED,
             {
                 "connector": self.name,
@@ -397,7 +406,7 @@ class ConnectedMoonrakerPrinter(
             self.set_state(ConnectedPrinterState.CLOSED_WITH_ERROR, error=error)
         else:
             self.state = ConnectedPrinterState.CLOSED
-        eventManager().fire(Events.DISCONNECTED)
+        self._event_bus.fire(Events.DISCONNECTED)
 
     def on_moonraker_server_info(self, server_info):
         firmware_info = FirmwareInformation(
@@ -565,7 +574,9 @@ class ConnectedMoonrakerPrinter(
             self.refresh_printer_files()
 
         elif action == "shutdown":
-            if self._settings.getBoolean(["serial", "enableShutdownActionCommand"]):
+            if self._plugin_settings.global_get_boolean(
+                ["serial", "enableShutdownActionCommand"]
+            ):
                 from octoprint.server import system_command_manager
 
                 try:
@@ -592,7 +603,7 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_position_update(self, position: Coordinate):
         prev = self._position
         if prev and prev.z != position.z:
-            self._event_manager.fire(Events.Z_CHANGE, {"new": position.z, "old": prev.z})
+            self._event_bus.fire(Events.Z_CHANGE, {"new": position.z, "old": prev.z})
         self._position = position
 
     ##~~ helpers
