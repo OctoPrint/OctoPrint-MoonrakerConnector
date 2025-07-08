@@ -63,6 +63,13 @@ class ConnectedMoonrakerPrinter(
     def connection_options(cls) -> dict:
         return {}
 
+    @classmethod
+    def connection_preconditions_met(cls, params):
+        from octoprint.util.net import resolve_host
+
+        host = params.get("host")
+        return host and resolve_host(host)
+
     TEMPERATURE_LOOKUP = {"extruder": "tool0", "heater_bed": "bed", "chamber": "chamber"}
 
     def __init__(self, *args, **kwargs):
