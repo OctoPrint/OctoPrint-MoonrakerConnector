@@ -17,8 +17,10 @@ class MoonrakerConnectorPlugin(
     octoprint.plugin.StartupPlugin,
 ):
     def initialize(self):
-        from .connector import ConnectedMoonrakerPrinter  # noqa: F401
+        # this not only imports but also registers the connector with the system!
+        from .connector import ConnectedMoonrakerPrinter
 
+        # inject properties into connector class
         ConnectedMoonrakerPrinter._event_bus = self._event_bus
         ConnectedMoonrakerPrinter._file_manager = self._file_manager
         ConnectedMoonrakerPrinter._plugin_manager = self._plugin_manager
@@ -65,6 +67,9 @@ class MoonrakerConnectorPlugin(
                 "custom_bindings": True,
             }
         ]
+
+    def is_template_autoescaped(self):
+        return True
 
 
 __plugin_name__ = "Moonraker Connector"
