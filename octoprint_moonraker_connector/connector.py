@@ -1,6 +1,6 @@
 import logging
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, Union, cast
 
 from octoprint.events import Events
 from octoprint.filemanager import FileDestinations, valid_file_type
@@ -12,6 +12,11 @@ from octoprint.printer.connection import (
     FirmwareInformation,
 )
 from octoprint.printer.job import PrintJob
+from octoprint.schema.config.controls import (
+    CustomControl,
+    CustomControlContainer,
+    CustomControlInput,
+)
 
 from .client import (
     Coordinate,
@@ -57,7 +62,8 @@ class ConnectedMoonrakerPrinter(
         move_folder=True,
     )
 
-    can_set_job_on_hold = False
+    supports_job_on_hold = False
+    supports_temperature_offsets = False
 
     @classmethod
     def connection_options(cls) -> dict:
@@ -151,6 +157,23 @@ class ConnectedMoonrakerPrinter(
 
     def get_error(self, *args, **kwargs):
         return self._error
+
+    def get_additional_controls(
+        self,
+    ) -> list[Union[CustomControl, CustomControlContainer]]:
+        controls = [
+            self._to_custom_control(macro, data)
+            for macro, data in self._client.current_macros.items()
+        ]
+        controls.sort(key=lambda x: x.name.lower())
+
+        return [
+            CustomControlContainer(
+                name=f"Printer Macros ({len(controls)})",
+                children=controls,
+                collapsed=True,
+            )
+        ]
 
     def jog(self, axes, relative=True, speed=None, *args, **kwargs):
         command = "G0 {}".format(
@@ -447,6 +470,9 @@ class ConnectedMoonrakerPrinter(
 
         self._listener.on_printer_files_refreshed(self._files)
 
+    def on_moonraker_macros_updated(self, macros):
+        self._listener.on_printer_controls_updated(self.get_additional_controls())
+
     def on_moonraker_printer_state_changed(self, state: PrinterState) -> None:
         self._printer_state = state
 
@@ -668,3 +694,21 @@ class ConnectedMoonrakerPrinter(
         return PrinterFile(
             path=info.path, display=parts[-1], size=info.size, date=int(info.modified)
         )
+
+    def _to_custom_control(self, macro: str, data: dict[str, Any]) -> CustomControl:
+        if data:
+            inputs = [
+                CustomControlInput(
+                    name=name, parameter=name, default=value if value is not None else ""
+                )
+                for name, value in data.items()
+            ]
+            return CustomControl(
+                name=macro,
+                command=macro
+                + " "
+                + " ".join([f"{input.name}={{{input.name}}}" for input in inputs]),
+                input=inputs,
+            )
+        else:
+            return CustomControl(name=macro, command=macro)

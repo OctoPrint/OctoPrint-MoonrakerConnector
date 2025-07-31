@@ -1,6 +1,7 @@
 import enum
 import io
 import logging
+import re
 import threading
 import time
 from collections import namedtuple
@@ -77,6 +78,14 @@ class PositionData(BaseModel):
     homing_origins: Optional[Coordinate] = None  # offsets
     position: Optional[Coordinate] = None  # current w/ offsets
     gcode_position: Optional[Coordinate] = None  # current w/o offsets
+
+
+class Configfile(BaseModel):
+    config: dict[str, Any] = {}
+    settings: dict[str, Any] = {}
+    save_config_pending: bool = False
+    save_config_pending_items: dict[str, Any] = {}
+    warnings: list[str] = []
 
 
 class TemperatureDataPoint:
@@ -172,6 +181,9 @@ class MoonrakerClientListener:
     def on_moonraker_printer_files_updated(self, files: list[FileInfo]) -> None:
         pass
 
+    def on_moonraker_macros_updated(self, macros: list[dict[str, Any]]) -> None:
+        pass
+
     def on_moonraker_temperature_update(
         self, data: dict[str, TemperatureDataPoint]
     ) -> None:
@@ -207,14 +219,21 @@ MONITORED_FILE_ROOTS = "gcodes"
 
 ACTION_PREFIX = "// action:"
 
+MACRO_PARAM_REGEX = re.compile(r"params\.(?P<name>\w+)", flags=re.IGNORECASE)
+MACRO_PARAM_DEFAULT_REGEX = re.compile(
+    r"\|default\(\s*(?P<value>(?P<quotechar>[\"'])(?:\\(?P=quotechar)|(?!(?P=quotechar)).)*(?P=quotechar)|-?\d[^,\)]*)"
+)
+
 
 class MoonrakerClient(JsonRpcClient):
     WEBSOCKET_URL = "ws://{host}:{port}/websocket"
     HTTP_URL = "http://{host}:{port}"
 
     GENERIC_HEATER_PREFIX = "heater_generic "
+    MACRO_PREFIX = "gcode_macro "
 
     RELEVANT_PRINTER_OBJECTS = (
+        "configfile",
         "display_status",
         "extruder",
         "gcode_move",
@@ -223,7 +242,10 @@ class MoonrakerClient(JsonRpcClient):
         "print_stats",
         "virtual_sdcard",
         lambda obj_list: [
-            x for x in obj_list if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+            x
+            for x in obj_list
+            if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+            or x.startswith(MoonrakerClient.MACRO_PREFIX)
         ],
     )
 
@@ -248,7 +270,7 @@ class MoonrakerClient(JsonRpcClient):
 
         self._klipper_state: KlipperState = KlipperState.UNKNOWN
         self._klipper_state_subscription = False
-        self._obj_subs: list[str] = []
+        self._subbed_objs: list[str] = []
 
         self._log_history_received = False
 
@@ -257,6 +279,9 @@ class MoonrakerClient(JsonRpcClient):
         self._last_temperature_update = None
 
         self._current_files: list[FileInfo] = []
+
+        self._current_configfile: Configfile = None
+        self._current_macros: dict[str, dict[str, Any]] = {}
 
         self._handshake_attempt = 0
 
@@ -283,6 +308,10 @@ class MoonrakerClient(JsonRpcClient):
     @property
     def current_files(self) -> list[FileInfo]:
         return self._current_files
+
+    @property
+    def current_macros(self) -> dict[str, dict[str, Any]]:
+        return self._current_macros
 
     def on_open(self, *args, **kwargs):
         try:
@@ -424,28 +453,36 @@ class MoonrakerClient(JsonRpcClient):
             try:
                 printer_objects = future.result()
 
-                obj_subs = []
-
                 obj_list = printer_objects.get("objects", [])
+
+                matched_objs = []
                 for obj in self.RELEVANT_PRINTER_OBJECTS:
                     if isinstance(obj, str) and obj in obj_list:
-                        obj_subs.append(obj)
+                        matched_objs.append(obj)
 
                     elif callable(obj):
                         matched = obj(obj_list)
-                        obj_subs += matched
+                        matched_objs += matched
 
-                if obj_subs:
-                    self._obj_subs = obj_subs
-                    self._heaters = [
-                        x
-                        for x in obj_subs
-                        if x in ("extruder", "heater_bed")
-                        or x.startswith(self.GENERIC_HEATER_PREFIX)
+                if matched_objs:
+                    subbed_objs = [
+                        obj
+                        for obj in matched_objs
+                        if obj != "configfile" and not obj.startswith(self.MACRO_PREFIX)
                     ]
 
-                    self.query_printer_objects(obj_subs)
-                    self.subscribe_printer_objects(obj_subs).add_done_callback(
+                    self._subbed_objs = subbed_objs
+                    self._heaters = [
+                        obj
+                        for obj in matched_objs
+                        if obj in ("extruder", "heater_bed")
+                        or obj.startswith(self.GENERIC_HEATER_PREFIX)
+                    ]
+
+                    self.query_printer_objects(matched_objs)
+
+                    # subscribe to all relevant objects
+                    self.subscribe_printer_objects(subbed_objs).add_done_callback(
                         on_printer_objects_subscribed
                     )
 
@@ -471,7 +508,7 @@ class MoonrakerClient(JsonRpcClient):
 
     def query_printer_objects(self, objs: list[str] = None) -> Future:
         if objs is None:
-            objs = self._obj_subs
+            objs = self._subbed_objs
 
         def on_result(future: Future) -> None:
             try:
@@ -484,7 +521,7 @@ class MoonrakerClient(JsonRpcClient):
                     return
 
                 payload = result["status"]
-                self._process_update(payload)
+                self._process_query_result(payload)
 
             except Exception:
                 self._logger.exception("Error while querying printer objects")
@@ -496,7 +533,7 @@ class MoonrakerClient(JsonRpcClient):
 
     def subscribe_printer_objects(self, objs: list[str] = None) -> Future:
         if objs is None:
-            objs = self._obj_subs
+            objs = self._subbed_objs
 
         params = {"objects": dict.fromkeys(objs)}
         return self.call_method("printer.objects.subscribe", params=params)
@@ -807,6 +844,10 @@ class MoonrakerClient(JsonRpcClient):
 
     ##~~ helpers
 
+    def _process_query_result(self, payload: dict[str, Any]) -> None:
+        self._update_gcode_macros(payload)
+        self._process_update(payload)
+
     def _process_update(self, payload: dict[str, Any]) -> None:
         self._update_gcode_move(payload)
         self._update_idle_timeout(payload)
@@ -898,6 +939,33 @@ class MoonrakerClient(JsonRpcClient):
         if position.gcode_position is not None:
             self._listener.on_moonraker_position_update(position.gcode_position)
 
+    def _update_gcode_macros(self, payload: dict[str, Any]) -> None:
+        if "configfile" not in payload:
+            return
+
+        macro_keys = [key for key in payload if key.startswith(self.MACRO_PREFIX)]
+        if not macro_keys:
+            return
+
+        self._current_configfile = Configfile(**payload["configfile"])
+
+        macros = {}
+
+        for key in macro_keys:
+            lower_key = key.lower()
+            if lower_key not in self._current_configfile.settings:
+                continue
+
+            macro = key[len(self.MACRO_PREFIX) :]
+            if macro.startswith("_"):
+                continue
+
+            gcode = self._current_configfile.settings[lower_key].get("gcode", "")
+            macros[macro] = extract_macro_parameters(gcode)
+
+        self._current_macros = macros
+        self._listener.on_moonraker_macros_updated(macros)
+
     def _to_multiline_loglines(self, prefix, *lines) -> list[str]:
         if len(lines) == 0:
             return []
@@ -905,6 +973,30 @@ class MoonrakerClient(JsonRpcClient):
             return [f"{prefix} {lines[0]}"]
         else:
             return [f"{prefix} {lines[0]}"] + [f"... {line}" for line in lines[1:]]
+
+
+def extract_macro_parameters(gcode: str) -> dict[str, Union[None, str, int, float, bool]]:
+    match = MACRO_PARAM_REGEX.finditer(gcode)
+    if not match:
+        return {}
+
+    result = {}
+    for m in match:
+        name = m.group("name")
+        value = None
+
+        rest = gcode[m.span(0)[1] :]
+        default_match = MACRO_PARAM_DEFAULT_REGEX.match(rest)
+        if default_match:
+            value = default_match.group("value")
+
+            quotechar = default_match.group("quotechar")
+            if quotechar:
+                value = value[1:-1].replace(f"\\{quotechar}", quotechar)
+
+        result[name] = value
+
+    return result
 
 
 if __name__ == "__main__":
