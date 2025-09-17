@@ -85,11 +85,6 @@ class ConnectedMoonrakerPrinter(
 
         self._host = kwargs.get("host")
 
-        # TODO: REMOVE ME!!!
-        if not self._host:
-            self._host = "q1pro.lan"
-        # END TODO
-
         try:
             self._port = int(kwargs.get("port"))
         except ValueError:
@@ -553,6 +548,9 @@ class ConnectedMoonrakerPrinter(
                 elapsed=0.0,
                 cleaned_elapsed=0.0,
             )
+
+        if self._progress is None:
+            return
 
         dirty = False
 
