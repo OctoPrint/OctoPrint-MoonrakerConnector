@@ -324,7 +324,7 @@ class MoonrakerClient(JsonRpcClient):
         try:
             super().on_close(cls, code, reason)
             error = None
-            if code != 1000:
+            if code and code != 1000:
                 error = f"Websocket closed unexpectedly: {reason}"
             self._listener.on_moonraker_disconnected(error=error)
         except Exception:
