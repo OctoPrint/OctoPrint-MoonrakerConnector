@@ -915,6 +915,13 @@ class MoonrakerClient(JsonRpcClient):
 
         sdcard_state = SDCardStats(**payload["virtual_sdcard"])
 
+        if sdcard_state.file_path is not None:
+            # this is the very first sd card status we see, before the print starts
+            # properly - we'll ignore it for progress calculation to be able to
+            # clean long running macros like heat up, leveling etc from the print
+            # time estimation
+            return
+
         if sdcard_state.progress is not None or sdcard_state.file_position is not None:
             self._listener.on_moonraker_print_progress(
                 progress=sdcard_state.progress, file_position=sdcard_state.file_position

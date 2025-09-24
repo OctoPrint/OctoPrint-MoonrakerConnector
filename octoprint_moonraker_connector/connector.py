@@ -98,6 +98,7 @@ class ConnectedMoonrakerPrinter(
 
         self._progress: JobProgress = None
         self._job_cache: str = None
+        self._job_delay: float = 0.0
 
         self._printer_state: PrinterState = IdleState.UNKNOWN
         self._idle_state: IdleState = IdleState.UNKNOWN
@@ -284,6 +285,7 @@ class ConnectedMoonrakerPrinter(
         self._progress = JobProgress(
             job=self.current_job, progress=0.0, pos=pos, elapsed=0.0, cleaned_elapsed=0.0
         )
+        self._job_delay = 0.0
 
         try:
             if self.current_job.storage == FileDestinations.PRINTER:
@@ -548,6 +550,7 @@ class ConnectedMoonrakerPrinter(
                 elapsed=0.0,
                 cleaned_elapsed=0.0,
             )
+            self._job_delay = 0.0
 
         if self._progress is None:
             return
@@ -562,9 +565,13 @@ class ConnectedMoonrakerPrinter(
             dirty = True
         if elapsed_time is not None:
             self._progress.elapsed = elapsed_time
-            dirty = True
-        if cleaned_time is not None:
-            self._progress.cleaned_elapsed = cleaned_time
+            if self._progress.progress:
+                if not self._job_delay:
+                    self._job_delay = elapsed_time
+                self._progress.cleaned_elapsed = elapsed_time - self._job_delay
+            else:
+                self._progress.cleaned_elapsed = 0.0
+
             dirty = True
 
         if dirty:
