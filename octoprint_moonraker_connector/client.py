@@ -10,13 +10,43 @@ from typing import IO, Any, Literal, Optional, Union
 
 import requests
 
-from octoprint.schema import BaseModel
+from octoprint.schema import BaseModel, BaseModelExtra
 
 from .jsonrpc import JsonRpcClient
 
 
+class ThumbnailInfo(BaseModel):
+    width: int
+    height: int
+    size: int
+    relative_path: str
+
+
 class FileInfo(BaseModel):
     path: str
+    modified: float
+    size: int
+    permissions: str
+
+
+class ExtendedFileInfo(BaseModelExtra):
+    filename: str
+    modified: float
+    size: int
+    permissions: str
+
+    estimated_time: Optional[float] = None
+    nozzle_diameter: Optional[float] = None
+    filament_total: Optional[float] = None
+    thumbnails: list[ThumbnailInfo] = []
+
+
+class InternalFile(ExtendedFileInfo):
+    path: str
+
+
+class DirInfo(BaseModel):
+    dirname: str
     modified: float
     size: int
     permissions: str
@@ -178,7 +208,9 @@ class MoonrakerClientListener:
     def on_moonraker_server_info(self, server_info: dict[str, Any]) -> None:
         pass
 
-    def on_moonraker_printer_files_updated(self, files: list[FileInfo]) -> None:
+    def on_moonraker_file_tree_updated(
+        self, root: str, path: str, tree: dict[str, dict[str, InternalFile]]
+    ) -> None:
         pass
 
     def on_moonraker_macros_updated(self, macros: list[dict[str, Any]]) -> None:
@@ -215,9 +247,11 @@ MAX_HANDSHAKE_ATTEMPTS = 5
 
 TEMPERATURE_INTERVAL = 1.0
 
-MONITORED_FILE_ROOTS = "gcodes"
+MONITORED_FILE_ROOTS = ("gcodes",)
 
 ACTION_PREFIX = "// action:"
+
+IGNORED_DIRS = (".thumbs",)
 
 MACRO_PARAM_REGEX = re.compile(r"params\.(?P<name>\w+)", flags=re.IGNORECASE)
 MACRO_PARAM_DEFAULT_REGEX = re.compile(
@@ -278,7 +312,7 @@ class MoonrakerClient(JsonRpcClient):
         self._current_temperatures: dict[str, TemperatureDataPoint] = {}
         self._last_temperature_update = None
 
-        self._current_files: list[FileInfo] = []
+        self._current_tree: dict[str, dict[str, InternalFile]] = {}
 
         self._current_configfile: Configfile = None
         self._current_macros: dict[str, dict[str, Any]] = {}
@@ -306,8 +340,8 @@ class MoonrakerClient(JsonRpcClient):
         return self._current_temperatures
 
     @property
-    def current_files(self) -> list[FileInfo]:
-        return self._current_files
+    def current_tree(self) -> dict[str, dict[str, InternalFile]]:
+        return self._current_tree
 
     @property
     def current_macros(self) -> dict[str, dict[str, Any]]:
@@ -662,16 +696,77 @@ class MoonrakerClient(JsonRpcClient):
 
     # file management
 
-    def refresh_files(self, root="gcodes") -> Future:
+    def _refresh_tree(self, root="gcodes", path="", recursive=False) -> Future:
+        refresh_tree_result = Future()
+
         def on_result(future: Future) -> None:
             try:
-                files = future.result()
-                self._current_files = [FileInfo(**f) for f in files]
-                self._listener.on_moonraker_printer_files_updated(self._current_files)
-            except Exception:
-                self._logger.exception(f"Error while fetching file list for {root}")
+                info = future.result()
 
-        future = self.call_method("server.files.list", params={"root": root})
+                prefix = f"{path}/" if path else ""
+
+                internal_files = [
+                    InternalFile(path=f"{prefix}{f['filename']}", **f)
+                    for f in info.get("files")
+                ]
+                self._current_tree[path] = {f.filename: f for f in internal_files}
+
+                dirs = [
+                    DirInfo(**d)
+                    for d in info.get("dirs")
+                    if d["dirname"] not in IGNORED_DIRS
+                ]
+                if dirs and recursive:
+                    futures = [
+                        self._refresh_tree(
+                            root=root,
+                            path=f"{prefix}{d.dirname}",
+                            recursive=recursive,
+                        )
+                        for d in dirs
+                    ]
+
+                    def fetched(f: Future) -> None:
+                        try:
+                            f.result()
+                            futures.remove(f)
+                        except Exception as exc:
+                            refresh_tree_result.set_exception(exc)
+
+                        if len(futures) == 0:
+                            refresh_tree_result.set_result(self._current_tree)
+
+                    for f in futures:
+                        f.add_done_callback(fetched)
+
+                else:
+                    refresh_tree_result.set_result(self._current_tree)
+
+            except Exception as exc:
+                self._logger.exception(
+                    f"Error while fetching directory information for {root}/{path}"
+                )
+                refresh_tree_result.exception(exc)
+
+        future = self.call_method(
+            "server.files.get_directory",
+            params={"path": f"{root}/{path}", "extended": True},
+        )
+        future.add_done_callback(on_result)
+
+        return refresh_tree_result
+
+    def refresh_tree(self, root="gcodes", path="", recursive=False) -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                tree = future.result()
+                self._listener.on_moonraker_file_tree_updated(root, path, tree)
+            except Exception:
+                self._logger.exception(
+                    f"Error while fetching file tree for {root}{' and path {path}' if path else ''}"
+                )
+
+        future = self._refresh_tree(root=root, path=path, recursive=recursive)
         future.add_done_callback(on_result)
         return future
 
@@ -817,11 +912,42 @@ class MoonrakerClient(JsonRpcClient):
     def on_filelist_changed(self, _, params):
         assert isinstance(params, list)
 
-        roots = [item.get("item", {}).get("root") for item in params]
-        monitored_roots = [root for root in roots if root in MONITORED_FILE_ROOTS]
+        to_refresh = []
 
-        for root in monitored_roots:
-            self.refresh_files(root=root)
+        def enqueue_refresh(item, target_parent=True) -> None:
+            root = item.get("root")
+            if root not in MONITORED_FILE_ROOTS:
+                return
+
+            path = item.get("path")
+            if path is None:
+                return
+
+            if target_parent:
+                if "/" in path:
+                    path, _ = path.rsplit("/", 1)
+                else:
+                    path = ""
+
+            to_refresh.append((root, path))
+
+        for entry in params:
+            action = entry.get("action")
+            if action is None:
+                continue
+
+            item = entry.get("item")
+            if item is None:
+                continue
+
+            enqueue_refresh(item, target_parent=(action.endswith("_file")))
+
+            source_item = entry.get("source_item")
+            if source_item:
+                enqueue_refresh(source_item, target_parent=(action.endswith("_file")))
+
+        for root, path in to_refresh:
+            self.refresh_tree(root=root, path=path, recursive=False)
 
     def on_gcode_response(self, _, params):
         self._listener.on_moonraker_gcode_log(

@@ -1,10 +1,17 @@
 import logging
+import math
+import os
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Union, cast
 
 from octoprint.events import Events
 from octoprint.filemanager import FileDestinations, valid_file_type
-from octoprint.filemanager.storage import StorageCapabilities
+from octoprint.filemanager.storage import (
+    AnalysisFilamentUse,
+    AnalysisResult,
+    MetadataEntry,
+    StorageCapabilities,
+)
 from octoprint.printer import JobProgress, PrinterFile, PrinterFilesMixin
 from octoprint.printer.connection import (
     ConnectedPrinter,
@@ -20,8 +27,8 @@ from octoprint.schema.config.controls import (
 
 from .client import (
     Coordinate,
-    FileInfo,
     IdleState,
+    InternalFile,
     KlipperState,
     MoonrakerClient,
     MoonrakerClientListener,
@@ -60,6 +67,7 @@ class ConnectedMoonrakerPrinter(
         remove_folder=True,
         copy_folder=True,
         move_folder=True,
+        metadata=True,
     )
 
     supports_job_on_hold = False
@@ -97,7 +105,7 @@ class ConnectedMoonrakerPrinter(
         self._error = None
 
         self._progress: JobProgress = None
-        self._job_cache: str = None
+        self._job_cache: list[str] = []
         self._job_delay: float = 0.0
 
         self._printer_state: PrinterState = IdleState.UNKNOWN
@@ -354,8 +362,10 @@ class ConnectedMoonrakerPrinter(
     def printer_files_mounted(self) -> bool:
         return self._client is not None
 
-    def refresh_printer_files(self, blocking=False, timeout=10, *args, **kwargs) -> None:
-        future = self._client.refresh_files()
+    def refresh_printer_files(
+        self, path="", recursive=False, blocking=False, timeout=10, *args, **kwargs
+    ) -> None:
+        future = self._client.refresh_tree(path=path, recursive=recursive)
         if blocking:
             future.result(timeout=timeout)
 
@@ -364,9 +374,32 @@ class ConnectedMoonrakerPrinter(
             return []
 
         if refresh:
-            self.refresh_printer_files(blocking=True)
+            self.refresh_printer_files(recursive=recursive, blocking=True)
 
-        return [self._to_printer_file(f) for f in self._client.current_files]
+        result = []
+        for contents in self._client.current_tree.values():
+            result.extend([self._to_printer_file(f) for f in contents.values()])
+        return result
+
+    def get_printer_file(self, path: str, refresh=False, *args, **kwargs):
+        if not self.printer_files_mounted:
+            return None
+
+        if "/" in path:
+            parent, name = path.rsplit("/", 1)
+        else:
+            parent = ""
+            name = path
+
+        if refresh:
+            self.refresh_printer_files(path=parent, blocking=True)
+
+        if (
+            parent in self._client.current_tree
+            and name in self._client.current_tree[parent]
+        ):
+            return self._to_printer_file(self._client.current_tree[parent][name])
+        return None
 
     def create_printer_folder(self, target: str, *args, **kwargs) -> None:
         self._client.create_folder(target).result()
@@ -410,6 +443,22 @@ class ConnectedMoonrakerPrinter(
     def move_printer_file(self, source, target, *args, **kwargs):
         self._client.move_path(source, target).result()
 
+    def get_printer_file_metadata(self, path, *args, **kwargs) -> MetadataEntry:
+        if "/" in path:
+            parent, name = path.rsplit("/", 1)
+        else:
+            parent = ""
+            name = path
+
+        if (
+            parent in self._client.current_tree
+            and name in self._client.current_tree[parent]
+        ):
+            info = self._client.current_tree[parent][name]
+            return self._get_metadata_entry_for_file(info)
+
+        return None
+
     ##~~ MoonrakerClientListener interface
 
     def on_moonraker_connected(self):
@@ -424,7 +473,7 @@ class ConnectedMoonrakerPrinter(
             },
         )
         self._listener.on_printer_files_available(True)
-        self.refresh_printer_files()
+        self.refresh_printer_files(recursive=True)
 
     def on_moonraker_disconnected(self, error: str = None):
         self._listener.on_printer_files_available(False)
@@ -458,14 +507,23 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_gcode_log(self, *lines: str) -> None:
         self._listener.on_printer_logs(*lines)
 
-    def on_moonraker_printer_files_updated(self, files: list[FileInfo]):
-        self._files = [self._to_printer_file(f) for f in files]
+    def on_moonraker_file_tree_updated(
+        self, root: str, path: str, tree: dict[str, dict[str, InternalFile]]
+    ):
+        if root != "gcodes":
+            return
 
-        self._job_cache = [
-            f.path for f in self._files if f.path.startswith(".octoprint/")
+        paths = [
+            p
+            for p in self._client.current_tree
+            if p == ".octoprint" or p.startswith(".octoprint/")
         ]
+        job_cache = []
+        for p in paths:
+            job_cache.extend([f.path for f in self._client.current_tree[p].values()])
+        self._job_cache = job_cache
 
-        self._listener.on_printer_files_refreshed(self._files)
+        self._listener.on_printer_files_refreshed(self.get_printer_files(refresh=False))
 
     def on_moonraker_macros_updated(self, macros):
         self._listener.on_printer_controls_updated(self.get_additional_controls())
@@ -494,7 +552,7 @@ class ConnectedMoonrakerPrinter(
                         if path is None or size is None:
                             raise ValueError("Missing path or size")
 
-                        job = PrintJob(storage="printer", path=path, size=size)
+                        job = self.create_job(path)
 
                     except Exception:
                         self._logger.exception(
@@ -694,10 +752,39 @@ class ConnectedMoonrakerPrinter(
                 self._listener.on_printer_job_paused()
                 self.state = ConnectedPrinterState.PAUSED
 
-    def _to_printer_file(self, info: FileInfo) -> PrinterFile:
-        parts = info.path.split("/")
+    def _get_metadata_entry_for_file(self, f: InternalFile) -> MetadataEntry:
+        filament_length = f.filament_total
+        nozzle_dia = f.nozzle_diameter
+
+        filament_analysis = {}
+        if filament_length and nozzle_dia:
+            radius = nozzle_dia / 2.0
+            filament_volume = math.pi * radius * radius * filament_length / 1000.0
+            filament_analysis = {
+                "tool0": AnalysisFilamentUse(
+                    length=filament_length, volume=filament_volume
+                )
+            }
+
+        return MetadataEntry(
+            display=os.path.basename(f.path),
+            analysis=AnalysisResult(
+                estimatedPrintTime=f.estimated_time,
+                filament=filament_analysis,
+            ),
+        )
+
+    def _to_printer_file(self, internal: InternalFile) -> PrinterFile:
+        display = internal.path
+        if "/" in internal.path:
+            _, display = internal.path.rsplit("/", 1)
+
         return PrinterFile(
-            path=info.path, display=parts[-1], size=info.size, date=int(info.modified)
+            path=internal.path,
+            display=display,
+            size=internal.size,
+            date=int(internal.modified),
+            metadata=self._get_metadata_entry_for_file(internal),
         )
 
     def _to_custom_control(self, macro: str, data: dict[str, Any]) -> CustomControl:

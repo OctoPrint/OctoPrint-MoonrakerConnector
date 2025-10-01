@@ -17,8 +17,6 @@ class JsonRpcError(Exception):
 
     @classmethod
     def for_error(cls, code: int, message: str, data: Any = None) -> "JsonRpcError":
-        error_cls = cls
-
         if code == cls.PARSE_ERROR:
             error_cls = JsonRpcParseError
         elif code == cls.INVALID_REQUEST:
@@ -29,8 +27,10 @@ class JsonRpcError(Exception):
             error_cls = JsonRpcInvalidParamsError
         elif code in cls.SERVER_ERROR_RANGE:
             error_cls = JsonRpcServerError
+        else:
+            return JsonRpcError(code, message, data=data)
 
-        return error_cls(code, message, data=data)
+        return error_cls(message, data=data)
 
     def __init__(self, code, message, data=None):
         super().__init__(message)
