@@ -12,7 +12,7 @@ import requests
 
 from octoprint.schema import BaseModel, BaseModelExtra
 
-from .jsonrpc import JsonRpcClient
+from .jsonrpc import WEBSOCKET_ERROR_CODE_NORMAL, WEBSOCKET_ERROR_CODES, JsonRpcClient
 
 
 class ThumbnailInfo(BaseModel):
@@ -358,9 +358,18 @@ class MoonrakerClient(JsonRpcClient):
         try:
             super().on_close(cls, code, reason)
             error = None
-            if code and code != 1000:
-                error = f"Websocket closed unexpectedly: {reason}"
+            if not self._closing or (code and code != WEBSOCKET_ERROR_CODE_NORMAL):
+                if not reason:
+                    reason = WEBSOCKET_ERROR_CODES.get(code)
+
+                if reason:
+                    error = f"Websocket closed unexpectedly: {reason}"
+                else:
+                    error = "Websocket closed unexpectedly"
+                self._logger.warning(error)
+
             self._listener.on_moonraker_disconnected(error=error)
+
         except Exception:
             self._logger.exception("Error in on_close handler")
 

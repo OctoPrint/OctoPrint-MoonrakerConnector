@@ -7,6 +7,23 @@ from typing import Any
 
 import websocket
 
+WEBSOCKET_ERROR_CODE_NORMAL = 1000
+WEBSOCKET_ERROR_CODES = {
+    1000: "Normal closure",
+    1001: "Peer going away",
+    1002: "Peer terminated connection due to protocol error",
+    1003: "Peer terminated connection due to inacceptable data",
+    1004: "Reserved",
+    1005: "No status provided",
+    1006: "Connection closed abnormally",
+    1007: "Peer terminated connection due to inconsistent data",
+    1008: "Peer terminated connection due to violated policy",
+    1009: "Peer terminated connection due to too large message",
+    1010: "Peer terminated connection due to failure to negotiate necessary extensions",
+    1011: "Peer terminated connection due to unexpected condition",
+    1015: "Connection closed due to failure in TLS handshake (e.g. certificate invalid)",
+}
+
 
 class JsonRpcError(Exception):
     PARSE_ERROR = -32700
@@ -75,6 +92,7 @@ class JsonRpcClient(websocket.WebSocketApp):
         self._console_logger = logging.getLogger(f"{logger_name}.console")
 
         self._connect_future = None
+        self._closing = False
 
         self._subscribers = defaultdict(list)
         self._calls: dict[int, tuple[str, dict[str, Any], Future]] = {}
@@ -118,6 +136,8 @@ class JsonRpcClient(websocket.WebSocketApp):
             self._logger.exception("Exception in connection runner")
 
     def disconnect(self):
+        self._dual_log(logging.INFO, "Disconnecting...")
+        self._closing = True
         self.close()
 
     def on_open(self, cls):
