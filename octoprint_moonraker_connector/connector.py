@@ -472,7 +472,7 @@ class ConnectedMoonrakerPrinter(
         )
         thumb_path = sorted_thumbnails[0].relative_path
         if sizehint:
-            w, h = sizehint.split("x")
+            w, h = map(int, sizehint.split("x"))
             for t in sorted_thumbnails:
                 if t.width == w and t.height == h:
                     thumb_path = t.relative_path
