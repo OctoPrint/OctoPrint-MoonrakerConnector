@@ -2,7 +2,7 @@ import logging
 import math
 import os
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from octoprint.events import Events
 from octoprint.filemanager import FileDestinations, valid_file_type
@@ -68,6 +68,7 @@ class ConnectedMoonrakerPrinter(
         copy_folder=True,
         move_folder=True,
         metadata=True,
+        thumbnails=True,
     )
 
     supports_job_on_hold = False
@@ -381,7 +382,7 @@ class ConnectedMoonrakerPrinter(
             result.extend([self._to_printer_file(f) for f in contents.values()])
         return result
 
-    def get_printer_file(self, path: str, refresh=False, *args, **kwargs):
+    def _get_internal_file(self, path: str, refresh=False) -> Optional[InternalFile]:
         if not self.printer_files_mounted:
             return None
 
@@ -398,8 +399,15 @@ class ConnectedMoonrakerPrinter(
             parent in self._client.current_tree
             and name in self._client.current_tree[parent]
         ):
-            return self._to_printer_file(self._client.current_tree[parent][name])
+            return self._client.current_tree[parent][name]
+
         return None
+
+    def get_printer_file(self, path: str, refresh=False, *args, **kwargs):
+        internal = self._get_internal_file(path, refresh=refresh)
+        if not internal:
+            return None
+        return self._to_printer_file(internal)
 
     def create_printer_folder(self, target: str, *args, **kwargs) -> None:
         self._client.create_folder(target).result()
@@ -444,20 +452,33 @@ class ConnectedMoonrakerPrinter(
         self._client.move_path(source, target).result()
 
     def get_printer_file_metadata(self, path, *args, **kwargs) -> MetadataEntry:
-        if "/" in path:
-            parent, name = path.rsplit("/", 1)
-        else:
-            parent = ""
-            name = path
+        internal = self._get_internal_file(path)
+        if not internal:
+            return None
 
-        if (
-            parent in self._client.current_tree
-            and name in self._client.current_tree[parent]
-        ):
-            info = self._client.current_tree[parent][name]
-            return self._get_metadata_entry_for_file(info)
+        return self._get_metadata_entry_for_file(internal)
 
-        return None
+    def has_thumbnail(self, path, *args, **kwargs):
+        internal = self._get_internal_file(path)
+        return internal and internal.thumbnails
+
+    def download_thumbnail(self, path, sizehint=None, *args, **kwargs):
+        internal = self._get_internal_file(path)
+        if not internal or not internal.thumbnails:
+            return None
+
+        sorted_thumbnails = sorted(
+            internal.thumbnails, key=lambda x: x.width * x.height, reverse=True
+        )
+        thumb_path = sorted_thumbnails[0].relative_path
+        if sizehint:
+            w, h = sizehint.split("x")
+            for t in sorted_thumbnails:
+                if t.width == w and t.height == h:
+                    thumb_path = t.relative_path
+                    break
+
+        return self._client.download_file(thumb_path)
 
     ##~~ MoonrakerClientListener interface
 
@@ -779,12 +800,17 @@ class ConnectedMoonrakerPrinter(
         if "/" in internal.path:
             _, display = internal.path.rsplit("/", 1)
 
+        thumbnails = []
+        if internal.thumbnails:
+            thumbnails = [f"{x.width}x{x.height}" for x in internal.thumbnails]
+
         return PrinterFile(
             path=internal.path,
             display=display,
             size=internal.size,
             date=int(internal.modified),
             metadata=self._get_metadata_entry_for_file(internal),
+            thumbnails=thumbnails,
         )
 
     def _to_custom_control(self, macro: str, data: dict[str, Any]) -> CustomControl:
