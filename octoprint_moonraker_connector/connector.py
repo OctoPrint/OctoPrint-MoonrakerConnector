@@ -2,7 +2,8 @@ import logging
 import math
 import os
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from email.utils import parsedate_to_datetime
+from typing import IO, TYPE_CHECKING, Any, Optional, Union, cast
 
 from octoprint.events import Events
 from octoprint.filemanager import FileDestinations, valid_file_type
@@ -11,6 +12,7 @@ from octoprint.filemanager.storage import (
     AnalysisResult,
     MetadataEntry,
     StorageCapabilities,
+    StorageThumbnail,
 )
 from octoprint.printer import JobProgress, PrinterFile, PrinterFilesMixin
 from octoprint.printer.connection import (
@@ -36,12 +38,21 @@ from .client import (
     PrintStats,
     SDCardStats,
     TemperatureDataPoint,
+    ThumbnailInfo,
 )
 
 if TYPE_CHECKING:
     from octoprint.events import EventManager
     from octoprint.filemanager import FileManager
     from octoprint.plugin import PluginManager, PluginSettings
+
+
+EXTENSION_TO_THUMBNAIL_MIME = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "bmp": "image/bmp",
+}
 
 
 class ConnectedMoonrakerPrinter(
@@ -440,7 +451,7 @@ class ConnectedMoonrakerPrinter(
         return path
 
     def download_printer_file(self, path, *args, **kwargs):
-        return self._client.download_file(path)
+        return self._client.download_file(path).raw
 
     def delete_printer_file(self, path, *args, **kwargs):
         self._client.delete_file(path).result()
@@ -462,7 +473,58 @@ class ConnectedMoonrakerPrinter(
         internal = self._get_internal_file(path)
         return internal and internal.thumbnails
 
-    def download_thumbnail(self, path, sizehint=None, *args, **kwargs):
+    def get_thumbnail(
+        self, path, sizehint=None, *args, **kwargs
+    ) -> Optional[StorageThumbnail]:
+        thumbnail = self._thumbnail_for_sizehint(path, sizehint=sizehint)
+        if not thumbnail:
+            return None
+
+        return self._to_storage_thumbnail(thumbnail, path)
+
+    def download_thumbnail(self, path, sizehint=None, *args, **kwargs) -> Optional[IO]:
+        thumbnail = self._thumbnail_for_sizehint(path, sizehint=sizehint)
+        if not thumbnail:
+            return None
+
+        meta = self._to_storage_thumbnail(thumbnail, path)
+
+        thumb_path = thumbnail.relative_path
+
+        if "/" in path:
+            folder = path.rsplit("/", maxsplit=1)[0]
+            response = self._client.download_file(f"{folder}/{thumb_path}")
+        else:
+            response = self._client.download_file(thumb_path)
+
+        if "Content-Type" in response.headers:
+            meta.mime = response.headers.get("Content-Type")
+        if "Content-Length" in response.headers:
+            meta.size = int(response.headers.get("Content-Length"))
+        if "Last-Modified" in response.headers:
+            lm = parsedate_to_datetime(response.headers.get("Last-Modified"))
+            meta.last_modified = int(lm.timestamp())
+
+        return meta, response.raw
+
+    def _to_storage_thumbnail(
+        self, thumbnail: ThumbnailInfo, printable: str
+    ) -> StorageThumbnail:
+        name = thumbnail.relative_path
+        if "/" in name:
+            name = name.rsplit("/", maxsplit=1)[1]
+
+        ext = thumbnail.relative_path.rsplit(".", maxsplit=1)[1]
+
+        return StorageThumbnail(
+            name=name,
+            printable=printable,
+            sizehint=f"{thumbnail.width}x{thumbnail.height}",
+            mime=EXTENSION_TO_THUMBNAIL_MIME.get(ext, "image/png"),
+            size=thumbnail.size,
+        )
+
+    def _thumbnail_for_sizehint(self, path, sizehint=None) -> Optional[ThumbnailInfo]:
         internal = self._get_internal_file(path)
         if not internal or not internal.thumbnails:
             return None
@@ -470,16 +532,12 @@ class ConnectedMoonrakerPrinter(
         sorted_thumbnails = sorted(
             internal.thumbnails, key=lambda x: x.width * x.height, reverse=True
         )
-        thumb_path = sorted_thumbnails[0].relative_path
         if sizehint:
             w, h = map(int, sizehint.split("x"))
             for t in sorted_thumbnails:
                 if t.width == w and t.height == h:
-                    thumb_path = t.relative_path
-                    break
-
-        folder = internal.path.rsplit("/", maxsplit=1)[0]
-        return self._client.download_file(f"{folder}/{thumb_path}")
+                    return t
+        return sorted_thumbnails[0]
 
     ##~~ MoonrakerClientListener interface
 

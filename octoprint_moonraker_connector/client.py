@@ -842,7 +842,7 @@ class MoonrakerClient(JsonRpcClient):
         ).start()
         return future
 
-    def download_file(self, path: str, root: str = "gcodes") -> IO:
+    def download_file(self, path: str, root: str = "gcodes") -> requests.Response:
         headers = {}
         if self._apikey:
             headers["X-Api-Key"] = self._apikey
@@ -855,7 +855,7 @@ class MoonrakerClient(JsonRpcClient):
         response = requests.get(url, headers=headers, stream=True)
         response.raise_for_status()
 
-        return response.raw
+        return response
 
     def delete_file(self, path: str, root: str = "gcodes") -> Future:
         return self.call_method(
