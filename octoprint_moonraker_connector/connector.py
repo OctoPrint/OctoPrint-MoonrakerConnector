@@ -478,7 +478,8 @@ class ConnectedMoonrakerPrinter(
                     thumb_path = t.relative_path
                     break
 
-        return self._client.download_file(thumb_path)
+        folder = internal.path.rsplit("/", maxsplit=1)[0]
+        return self._client.download_file(f"{folder}/{thumb_path}")
 
     ##~~ MoonrakerClientListener interface
 
