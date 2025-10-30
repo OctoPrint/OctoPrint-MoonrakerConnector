@@ -194,8 +194,8 @@ class MoonrakerClientListener:
         self,
         progress: Optional[float] = None,
         file_position: Optional[int] = None,
-        elapsed_time: Optional[float] = None,
-        cleaned_time: Optional[float] = None,
+        total_duration: Optional[float] = None,
+        print_duration: Optional[float] = None,
     ) -> None:
         pass
 
@@ -1040,8 +1040,8 @@ class MoonrakerClient(JsonRpcClient):
             or print_stats.print_duration is not None
         ):
             self._listener.on_moonraker_print_progress(
-                elapsed_time=print_stats.total_duration,
-                cleaned_time=print_stats.print_duration,
+                total_duration=print_stats.total_duration,
+                print_duration=print_stats.print_duration,
             )
 
     def _update_virtual_sdcard(self, payload: dict[str, Any]) -> None:

@@ -677,8 +677,8 @@ class ConnectedMoonrakerPrinter(
         self,
         progress: float = None,
         file_position: int = None,
-        elapsed_time: float = None,
-        cleaned_time: float = None,
+        total_duration: float = None,
+        print_duration: float = None,
     ):
         if self._progress is None and self.current_job is not None:
             self._progress = JobProgress(
@@ -701,14 +701,20 @@ class ConnectedMoonrakerPrinter(
         if file_position is not None:
             self._progress.pos = file_position
             dirty = True
-        if elapsed_time is not None:
-            self._progress.elapsed = elapsed_time
+        if print_duration is not None:
+            self._progress.elapsed = print_duration
             if self._progress.progress:
                 if not self._job_delay:
-                    self._job_delay = elapsed_time
-                self._progress.cleaned_elapsed = elapsed_time - self._job_delay
+                    self._job_delay = print_duration
+                self._progress.cleaned_elapsed = print_duration - self._job_delay
             else:
                 self._progress.cleaned_elapsed = 0.0
+
+            if self.current_job.duration_estimate:
+                self._progress.left_estimate = (
+                    self.current_job.duration_estimate.estimate
+                    - self._progress.cleaned_elapsed
+                )
 
             dirty = True
 
