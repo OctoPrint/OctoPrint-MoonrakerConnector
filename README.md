@@ -1,10 +1,7 @@
 > [!IMPORTANT]
 >
-> This plugin is not compatible to the current release version of OctoPrint. It requires changes from the `alt-comm` branch
-> of OctoPrint which are going to go into a future version and are - just as this plugin - still under heavy development.
->
-> Consider this repository only here to be able to work in the open and share progress more easily - this is **NOT READY FOR
-> PRODUCTION!**.
+> This plugin is not compatible to the current release version of OctoPrint. It requires changes from the `dev` branch
+> of OctoPrint which are going to go into version 1.12.0.
 
 # OctoPrint-MoonrakerConnector
 
