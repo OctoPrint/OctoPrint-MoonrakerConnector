@@ -389,8 +389,18 @@ class ConnectedMoonrakerPrinter(
             self.refresh_printer_files(recursive=recursive, blocking=True)
 
         result = []
-        for contents in self._client.current_tree.values():
-            result.extend([self._to_printer_file(f) for f in contents.values()])
+        for path, contents in self._client.current_tree.items():
+            children = [self._to_printer_file(f) for f in contents.values()]
+            if children:
+                result.extend(children)
+            else:
+                # empty folder
+                result.append(
+                    PrinterFile(
+                        path=f"{path}/",
+                        display=path.rsplit("/", 1)[1] if "/" in path else path,
+                    )
+                )
         return result
 
     def _get_internal_file(self, path: str, refresh=False) -> Optional[InternalFile]:
@@ -420,19 +430,22 @@ class ConnectedMoonrakerPrinter(
             return None
         return self._to_printer_file(internal)
 
-    def create_printer_folder(self, target: str, *args, **kwargs) -> None:
+    def create_printer_folder(self, target: str, *args, **kwargs) -> str:
         self._client.create_folder(target).result()
+        return target
 
     def delete_printer_folder(
         self, target: str, recursive: bool = False, *args, **kwargs
-    ):
+    ) -> None:
         self._client.delete_folder(target, force=recursive).result()
 
-    def copy_printer_folder(self, source, target, *args, **kwargs):
+    def copy_printer_folder(self, source, target, *args, **kwargs) -> str:
         self._client.copy_path(source, target).result()
+        return target
 
-    def move_printer_folder(self, source, target, *args, **kwargs):
+    def move_printer_folder(self, source, target, *args, **kwargs) -> str:
         self._client.move_path(source, target).result()
+        return target
 
     def upload_printer_file(
         self, path_or_file, path, upload_callback, *args, **kwargs
@@ -450,17 +463,19 @@ class ConnectedMoonrakerPrinter(
         self._client.upload_file(path_or_file, path).add_done_callback(on_upload_done)
         return path
 
-    def download_printer_file(self, path, *args, **kwargs):
+    def download_printer_file(self, path, *args, **kwargs) -> IO:
         return self._client.download_file(path).raw
 
-    def delete_printer_file(self, path, *args, **kwargs):
+    def delete_printer_file(self, path, *args, **kwargs) -> None:
         self._client.delete_file(path).result()
 
-    def copy_printer_file(self, source, target, *args, **kwargs):
+    def copy_printer_file(self, source, target, *args, **kwargs) -> str:
         self._client.copy_path(source, target).result()
+        return target
 
-    def move_printer_file(self, source, target, *args, **kwargs):
+    def move_printer_file(self, source, target, *args, **kwargs) -> str:
         self._client.move_path(source, target).result()
+        return target
 
     def get_printer_file_metadata(self, path, *args, **kwargs) -> MetadataEntry:
         internal = self._get_internal_file(path)
@@ -639,7 +654,7 @@ class ConnectedMoonrakerPrinter(
                             "Error while querying status, setting unknown job"
                         )
 
-                        job = PrintJob(storage="printer", path="???")
+                        job = PrintJob(storage="printer", path="???", display="???")
 
                     self.set_job(job)
                     self._listener.on_printer_job_changed(job)
