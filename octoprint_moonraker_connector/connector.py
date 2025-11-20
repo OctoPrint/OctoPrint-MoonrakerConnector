@@ -1,3 +1,4 @@
+import datetime
 import logging
 import math
 import os
@@ -26,6 +27,7 @@ from octoprint.schema.config.controls import (
     CustomControlContainer,
     CustomControlInput,
 )
+from octoprint.util.tz import UTC_TZ
 
 from .client import (
     Coordinate,
@@ -389,18 +391,9 @@ class ConnectedMoonrakerPrinter(
             self.refresh_printer_files(recursive=recursive, blocking=True)
 
         result = []
-        for path, contents in self._client.current_tree.items():
+        for contents in self._client.current_tree.values():
             children = [self._to_printer_file(f) for f in contents.values()]
-            if children:
-                result.extend(children)
-            else:
-                # empty folder
-                result.append(
-                    PrinterFile(
-                        path=f"{path}/",
-                        display=path.rsplit("/", 1)[1] if "/" in path else path,
-                    )
-                )
+            result.extend(children)
         return result
 
     def _get_internal_file(self, path: str, refresh=False) -> Optional[InternalFile]:
@@ -876,6 +869,16 @@ class ConnectedMoonrakerPrinter(
         )
 
     def _to_printer_file(self, internal: InternalFile) -> PrinterFile:
+        if internal.filename == ".":
+            # folder metadata
+            path = internal.path[:-1]
+            return PrinterFile(
+                path=path,
+                display=path.rsplit("/")[-2] if "/" in path else path,
+                size=internal.size,
+                date=datetime.datetime.fromtimestamp(internal.modified, tz=UTC_TZ),
+            )
+
         display = internal.path
         if "/" in internal.path:
             _, display = internal.path.rsplit("/", 1)
@@ -888,7 +891,7 @@ class ConnectedMoonrakerPrinter(
             path=internal.path,
             display=display,
             size=internal.size,
-            date=int(internal.modified),
+            date=datetime.datetime.fromtimestamp(internal.modified, tz=UTC_TZ),
             metadata=self._get_metadata_entry_for_file(internal),
             thumbnails=thumbnails,
         )

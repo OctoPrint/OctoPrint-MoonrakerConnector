@@ -705,7 +705,9 @@ class MoonrakerClient(JsonRpcClient):
 
     # file management
 
-    def _refresh_tree(self, root="gcodes", path="", recursive=False) -> Future:
+    def _refresh_tree(
+        self, root="gcodes", path="", recursive=False, parent: Optional[DirInfo] = None
+    ) -> Future:
         refresh_tree_result = Future()
 
         def on_result(future: Future) -> None:
@@ -720,6 +722,15 @@ class MoonrakerClient(JsonRpcClient):
                 ]
                 self._current_tree[path] = {f.filename: f for f in internal_files}
 
+                if parent:
+                    self._current_tree[path]["."] = InternalFile(
+                        path=f"{prefix}.",
+                        filename=".",
+                        modified=parent.modified,
+                        size=parent.size,
+                        permissions=parent.permissions,
+                    )
+
                 dirs = [
                     DirInfo(**d)
                     for d in info.get("dirs")
@@ -731,6 +742,7 @@ class MoonrakerClient(JsonRpcClient):
                             root=root,
                             path=f"{prefix}{d.dirname}",
                             recursive=recursive,
+                            parent=d,
                         )
                         for d in dirs
                     ]
