@@ -511,7 +511,7 @@ class ConnectedMoonrakerPrinter(
             meta.size = int(response.headers.get("Content-Length"))
         if "Last-Modified" in response.headers:
             lm = parsedate_to_datetime(response.headers.get("Last-Modified"))
-            meta.last_modified = int(lm.timestamp())
+            meta.last_modified = lm
 
         return meta, response.raw
 
