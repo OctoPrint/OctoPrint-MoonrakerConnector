@@ -52,6 +52,12 @@ class DirInfo(BaseModel):
     permissions: str
 
 
+class DiskUsage(BaseModel):
+    free: int
+    used: int
+    total: int
+
+
 class PrintStatsSupplemental(BaseModel):
     total_layer: Optional[int] = None
     current_layer: Optional[int] = None
@@ -313,6 +319,7 @@ class MoonrakerClient(JsonRpcClient):
         self._last_temperature_update = None
 
         self._current_tree: dict[str, dict[str, InternalFile]] = {}
+        self._current_usage: Optional[DiskUsage] = None
 
         self._current_configfile: Configfile = None
         self._current_macros: dict[str, dict[str, Any]] = {}
@@ -342,6 +349,10 @@ class MoonrakerClient(JsonRpcClient):
     @property
     def current_tree(self) -> dict[str, dict[str, InternalFile]]:
         return self._current_tree
+
+    @property
+    def current_usage(self) -> Optional[DiskUsage]:
+        return self._current_usage
 
     @property
     def current_macros(self) -> dict[str, dict[str, Any]]:
@@ -715,6 +726,8 @@ class MoonrakerClient(JsonRpcClient):
                 info = future.result()
 
                 prefix = f"{path}/" if path else ""
+
+                self._current_usage = DiskUsage(**info.get("disk_usage"))
 
                 internal_files = [
                     InternalFile(path=f"{prefix}{f['filename']}", **f)

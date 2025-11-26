@@ -15,7 +15,12 @@ from octoprint.filemanager.storage import (
     StorageCapabilities,
     StorageThumbnail,
 )
-from octoprint.printer import JobProgress, PrinterFile, PrinterFilesMixin
+from octoprint.printer import (
+    JobProgress,
+    PrinterFile,
+    PrinterFilesMixin,
+    PrinterFilesUsage,
+)
 from octoprint.printer.connection import (
     ConnectedPrinter,
     ConnectedPrinterState,
@@ -546,6 +551,12 @@ class ConnectedMoonrakerPrinter(
                 if t.width == w and t.height == h:
                     return t
         return sorted_thumbnails[0]
+
+    def get_usage_information(self) -> Optional[PrinterFilesUsage]:
+        usage = self._client.current_usage
+        if usage:
+            return PrinterFilesUsage(used=usage.used, total=usage.total)
+        return None
 
     ##~~ MoonrakerClientListener interface
 
