@@ -58,6 +58,19 @@ class DiskUsage(BaseModel):
     total: int
 
 
+class JobHistory(BaseModelExtra):
+    job_id: str
+    user: Optional[str] = None
+    filename: str
+    exists: bool
+    status: str
+    start_time: float
+    end_time: Optional[float] = None
+    print_duration: float
+    total_duration: float
+    filament_used: float
+
+
 class PrintStatsSupplemental(BaseModel):
     total_layer: Optional[int] = None
     current_layer: Optional[int] = None
@@ -184,6 +197,24 @@ class IdleState(enum.Enum):
             if state.value == value:
                 return state
         return cls.UNKNOWN
+
+
+class JobHistoryStatus(enum.Enum):
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    ERROR = "error"
+    KLIPPY_SHUTDONW = "klippy_shutdown"
+    KLIPPY_DISCONNECT = "klippy_disconnect"
+    INTERRUPTED = "interrupted"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def for_value(cls, value: str) -> "KlipperState":
+        for state in cls:
+            if state.value == value:
+                return state
+        return JobHistoryStatus.UNKNOWN
 
 
 class MoonrakerClientListener:
@@ -321,6 +352,8 @@ class MoonrakerClient(JsonRpcClient):
         self._current_tree: dict[str, dict[str, InternalFile]] = {}
         self._current_usage: Optional[DiskUsage] = None
 
+        self._job_history: dict[str, JobHistory] = {}
+
         self._current_configfile: Configfile = None
         self._current_macros: dict[str, dict[str, Any]] = {}
 
@@ -353,6 +386,10 @@ class MoonrakerClient(JsonRpcClient):
     @property
     def current_usage(self) -> Optional[DiskUsage]:
         return self._current_usage
+
+    @property
+    def job_history(self) -> dict[str, JobHistory]:
+        return self._job_history
 
     @property
     def current_macros(self) -> dict[str, dict[str, Any]]:
@@ -479,6 +516,7 @@ class MoonrakerClient(JsonRpcClient):
                     )
 
                     self.fetch_console_history()
+                    self.fetch_job_history()
                     self.subscribe_to_updates()
 
                 else:
@@ -801,6 +839,23 @@ class MoonrakerClient(JsonRpcClient):
                 )
 
         future = self._refresh_tree(root=root, path=path, recursive=recursive)
+        future.add_done_callback(on_result)
+        return future
+
+    def fetch_job_history(self, limit=50, order="desc") -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                history = future.result()
+                jobs = [JobHistory(**h) for h in history.get("jobs", [])]
+                self._job_history = {job.job_id: job for job in jobs}
+            except Exception:
+                self._logger.exception(
+                    f"Error while fetching job history (limit: {limit})"
+                )
+
+        future = self.call_method(
+            "server.history.list", params={"limit": limit, "order": order}
+        )
         future.add_done_callback(on_result)
         return future
 

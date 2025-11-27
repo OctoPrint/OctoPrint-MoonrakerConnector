@@ -11,6 +11,7 @@ from octoprint.filemanager import FileDestinations, valid_file_type
 from octoprint.filemanager.storage import (
     AnalysisFilamentUse,
     AnalysisResult,
+    HistoryEntry,
     MetadataEntry,
     StorageCapabilities,
     StorageThumbnail,
@@ -38,6 +39,7 @@ from .client import (
     Coordinate,
     IdleState,
     InternalFile,
+    JobHistoryStatus,
     KlipperState,
     MoonrakerClient,
     MoonrakerClientListener,
@@ -841,6 +843,7 @@ class ConnectedMoonrakerPrinter(
                 self._progress.progress = 1.0
                 self._listener.on_printer_job_done()
                 self.state = ConnectedPrinterState.OPERATIONAL
+                self._client.fetch_job_history()
             elif (
                 self.state == ConnectedPrinterState.CANCELLING
                 and self._printer_state
@@ -849,6 +852,7 @@ class ConnectedMoonrakerPrinter(
                 # print failed
                 self._listener.on_printer_job_cancelled()
                 self.state = ConnectedPrinterState.OPERATIONAL
+                self._client.fetch_job_history()
             elif (
                 self.state == ConnectedPrinterState.PAUSING
                 and self._printer_state == PrinterState.PAUSED
@@ -877,7 +881,28 @@ class ConnectedMoonrakerPrinter(
                 estimatedPrintTime=f.estimated_time,
                 filament=filament_analysis,
             ),
+            history=self._get_history_for_file(f),
         )
+
+    def _get_history_for_file(self, internal: InternalFile) -> list[HistoryEntry]:
+        if internal.job_id is None:
+            return []
+
+        history = self._client.job_history
+        if internal.job_id not in history:
+            return []
+
+        jobs = [h for h in history.values() if h.filename == internal.path]
+        return [
+            HistoryEntry(
+                timestamp=datetime.datetime.fromtimestamp(job.start_time, tz=UTC_TZ),
+                printerProfile="",
+                printTime=int(job.total_duration),
+                success=JobHistoryStatus.for_value(job.status)
+                in (JobHistoryStatus.COMPLETED,),
+            )
+            for job in jobs
+        ]
 
     def _to_printer_file(self, internal: InternalFile) -> PrinterFile:
         if internal.filename == ".":
