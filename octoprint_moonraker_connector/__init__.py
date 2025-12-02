@@ -1,9 +1,27 @@
 import logging
+from typing import Optional
+from urllib.parse import urljoin
 
+import requests
+from flask import jsonify
 from flask_babel import gettext
 
 import octoprint.plugin
 from octoprint.logging.handlers import TriggeredRolloverLogHandler
+from octoprint.util.url import set_url_query_param
+
+from . import schema
+
+URL_WEBCAM_INFO_MOONRAKER = "http://{host}:{port}/server/webcams/list"
+URL_WEBCAM_INFO_FLUIDD_LEGACY = (
+    "http://{host}:{port}/server/database/item?namespace=fluidd&key=cameras"
+)
+
+FLUIDD_LEGACY_CAMERA_TYPES = {
+    "mjpgstream": "mjpegstreamer",
+    "mjpgadaptive": "mjpegstreamer-adaptive",
+}
+MJPEG_STREAMER_WEBCAM_SERVICES = ("mjpegstreamer", "mjpegstreamer-adaptive")
 
 
 class MoonrakerJsonRpcLogHandler(TriggeredRolloverLogHandler):
@@ -14,6 +32,7 @@ class MoonrakerConnectorPlugin(
     octoprint.plugin.AssetPlugin,
     octoprint.plugin.TemplatePlugin,
     octoprint.plugin.SettingsPlugin,
+    octoprint.plugin.SimpleApiPlugin,
     octoprint.plugin.StartupPlugin,
 ):
     def initialize(self):
@@ -55,6 +74,31 @@ class MoonrakerConnectorPlugin(
             "emergency_stop_on_cancel": False,
         }
 
+    ##~~ SimpleApiPlugin
+
+    def on_api_get(self, request):
+        params = self._get_connector_params()
+        if params is None:
+            return []
+
+        host = params["host"]
+        port = params["port"]
+        apikey = params["apikey"]
+
+        webcams = []
+
+        if host is not None and port is not None:
+            webcams = self._get_all_webcams(host, port, apikey=apikey)
+        return jsonify(
+            webcams=[
+                self._to_api_webcam(webcam).model_dump(by_alias=True)
+                for webcam in webcams
+            ]
+        )
+
+    def is_api_protected(self):
+        return True
+
     ##~~ TemplatePlugin mixin
 
     def get_template_configs(self):
@@ -70,6 +114,130 @@ class MoonrakerConnectorPlugin(
 
     def is_template_autoescaped(self):
         return True
+
+    ##~~ Helpers
+
+    def _get_connector_params(self) -> Optional[dict]:
+        connection_state = self._printer.connection_state
+        connector = connection_state.get("connector")
+        if connector != "moonraker":
+            return None
+
+        host = connection_state.get("host")
+        port = connection_state.get("port")
+        apikey = connection_state.get("apikey")
+        return {"host": host, "port": port, "apikey": apikey}
+
+    def _get_all_webcams(
+        self, host: str, port: int, apikey: str = None
+    ) -> list[schema.WebcamEntry]:
+        webcams = []
+
+        webcams += self._get_moonraker_webcams(host, port, apikey=apikey)
+        webcams += self._get_legacy_fluidd_webcams(host, port, apikey=apikey)
+
+        return webcams
+
+    def _get_moonraker_webcams(
+        self, host: str, port: int, apikey: str = None
+    ) -> list[schema.WebcamEntry]:
+        headers = {}
+        if apikey:
+            headers["X-Api-Key"] = apikey
+
+        r = requests.post(
+            URL_WEBCAM_INFO_MOONRAKER.format(host=host, port=port), headers=headers
+        )
+        data = r.json()
+
+        base = f"http://{host}"
+        webcams = []
+        for webcam in data.get("webcams", []):
+            try:
+                entry = schema.WebcamEntry(**webcam)
+                entry.snapshot_url = urljoin(base, entry.snapshot_url)
+                entry.stream_url = urljoin(base, entry.stream_url)
+                webcams.append(entry)
+            except ValueError:
+                # invalid entry, ignore
+                continue
+        return webcams
+
+    def _get_legacy_fluidd_webcams(
+        self, host: str, port: int, apikey: str = None
+    ) -> list[schema.WebcamEntry]:
+        headers = {}
+        if apikey:
+            headers["X-Api-Key"] = apikey
+
+        r = requests.get(
+            URL_WEBCAM_INFO_FLUIDD_LEGACY.format(host=host, port=port),
+            headers=headers,
+        )
+        data = r.json()
+
+        if "result" not in data:
+            return []
+
+        query_result = data["result"]
+        try:
+            query_result = schema.FluiddWebcamDatabaseItem(**query_result)
+        except ValueError:
+            return []
+
+        result = []
+        for camera in query_result.value.cameras:
+            camera_type = FLUIDD_LEGACY_CAMERA_TYPES.get(camera.type, camera.type)
+
+            try:
+                webcam = schema.WebcamEntry(
+                    name=camera.name,
+                    location="printer",
+                    service=camera_type,
+                    enabled=True,
+                    icon="mdiWebcam",
+                    target_fps=camera.fpstarget,
+                    target_fps_idle=camera.fpsidletarget,
+                    snapshot_url=urljoin(f"http://{host}", camera.url),
+                    stream_url=urljoin(f"http://{host}", camera.url),
+                    flip_horizontal=camera.flipX,
+                    flip_vertical=camera.flipY,
+                    rotation=0,
+                    aspect_ratio="4:3",
+                    extra_data={},
+                    source="database",
+                    uid=camera.id,
+                )
+                self._set_mjpegstreamer_urls(webcam)
+                result.append(webcam)
+            except ValueError:
+                # invalid entry, ignore
+                continue
+
+        return result
+
+    def _set_mjpegstreamer_urls(self, webcam: schema.WebcamEntry) -> None:
+        if webcam.service in MJPEG_STREAMER_WEBCAM_SERVICES:
+            webcam.snapshot_url = set_url_query_param(
+                webcam.snapshot_url, "action", "snapshot"
+            )
+            webcam.stream_url = set_url_query_param(webcam.stream_url, "action", "stream")
+
+    def _to_api_webcam(self, webcam: schema.WebcamEntry) -> schema.ApiWebcamEntry:
+        return schema.ApiWebcamEntry(
+            key=webcam.uid,
+            name=webcam.name,
+            service=webcam.service,
+            enabled=webcam.enabled,
+            target_fps=webcam.target_fps,
+            target_fps_idle=webcam.target_fps_idle,
+            stream_url=webcam.stream_url,
+            snapshot_url=webcam.snapshot_url,
+            flip_h=webcam.flip_horizontal,
+            flip_v=webcam.flip_vertical,
+            rotation=webcam.rotation,
+            aspect_ratio=webcam.aspect_ratio,
+        )
 
 
 __plugin_name__ = "Moonraker Connector"

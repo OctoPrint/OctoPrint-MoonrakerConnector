@@ -1,0 +1,13 @@
+<div data-bind="foreach: webcams">
+    <div class="plugin_moonraker_connector_webcam"
+         data-bind="template: { name: template, data: $data }, attr: { 'data-service': $data.service }"></div>
+</div>
+
+<script type="text/html" id="moonraker_connector_webcam_template_mjpegstreamer">
+    <img data-bind="attr: { src: $data.url }">
+</script>
+
+<script type="text/html" id="moonraker_connector_webcam_template_mjpegstreamer-adaptive">
+    <img data-bind="attr: { src: $data.url }, event: { load: $data.snapshotRefreshed }">
+    <span class="fps" data-bind="text: snapshotFps"></span>
+</script>

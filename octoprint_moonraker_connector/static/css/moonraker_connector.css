@@ -1,0 +1,12 @@
+.plugin_moonraker_connector_webcam[data-service="mjpegstreamer-adaptive"] {
+    position: relative;
+}
+
+.plugin_moonraker_connector_webcam[data-service="mjpegstreamer-adaptive"] span.fps {
+    position: absolute;
+    top: 0;
+    right: 0;
+    background-color: #00000088;
+    color: white;
+    padding: 0.1em 0.3em;
+}

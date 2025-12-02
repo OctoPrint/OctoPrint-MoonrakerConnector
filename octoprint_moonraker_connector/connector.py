@@ -885,12 +885,7 @@ class ConnectedMoonrakerPrinter(
         )
 
     def _get_history_for_file(self, internal: InternalFile) -> list[HistoryEntry]:
-        if internal.job_id is None:
-            return []
-
         history = self._client.job_history
-        if internal.job_id not in history:
-            return []
 
         jobs = [h for h in history.values() if h.filename == internal.path]
         return [
