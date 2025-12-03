@@ -77,24 +77,21 @@ class MoonrakerConnectorPlugin(
     ##~~ SimpleApiPlugin
 
     def on_api_get(self, request):
-        params = self._get_connector_params()
-        if params is None:
-            return []
-
-        host = params["host"]
-        port = params["port"]
-        apikey = params["apikey"]
-
         webcams = []
 
-        if host is not None and port is not None:
-            webcams = self._get_all_webcams(host, port, apikey=apikey)
-        return jsonify(
-            webcams=[
-                self._to_api_webcam(webcam).model_dump(by_alias=True)
-                for webcam in webcams
-            ]
+        params = self._get_connector_params()
+        if params is not None:
+            host = params["host"]
+            port = params["port"]
+            apikey = params["apikey"]
+
+            if host is not None and port is not None:
+                webcams = self._get_all_webcams(host, port, apikey=apikey)
+
+        response = schema.ApiResponse(
+            webcams=[self._to_api_webcam(webcam) for webcam in webcams]
         )
+        return jsonify(response.model_dump(by_alias=True))
 
     def is_api_protected(self):
         return True
