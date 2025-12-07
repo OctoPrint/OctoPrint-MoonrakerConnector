@@ -105,7 +105,7 @@ class ConnectedMoonrakerPrinter(
         host = params.get("host")
         return host and resolve_host(host)
 
-    TEMPERATURE_LOOKUP = {"extruder": "tool0", "heater_bed": "bed", "chamber": "chamber"}
+    TEMPERATURE_LOOKUP = {"extruder": "tool0", "heater_bed": "bed", "chamber": "chamber", "Chamber": "chamber", "cavity": "chamber"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -573,6 +573,14 @@ class ConnectedMoonrakerPrinter(
                 "apikey": self._apikey is not None,
             },
         )
+        extruder_count = self._profile["extruder"]["count"]
+        if extruder_count > 1:
+            for i in range(1, extruder_count):
+                if f"extruder{i}" not in self.TEMPERATURE_LOOKUP:
+                    self.TEMPERATURE_LOOKUP[f"extruder{i}"] = f"tool{i}"
+        for heater, data in self._client.current_temperatures.items():
+            if heater not in self.TEMPERATURE_LOOKUP:
+                self.TEMPERATURE_LOOKUP[heater] = heater
         self._listener.on_printer_files_available(True)
         self.refresh_printer_files(recursive=True)
 
@@ -598,12 +606,12 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_temperature_update(
         self, data: dict[str, TemperatureDataPoint]
     ) -> None:
-        self._listener.on_printer_temperature_update(
-            {
-                self.TEMPERATURE_LOOKUP.get(key): (value.actual, value.target)
-                for key, value in data.items()
-            }
-        )
+        mapped_data = {}
+        for key, value in data.items():
+            new_key = self.TEMPERATURE_LOOKUP.get(key)
+            if new_key is not None:
+                mapped_data[new_key] = (value.actual, value.target)
+        self._listener.on_printer_temperature_update(mapped_data)
 
     def on_moonraker_gcode_log(self, *lines: str) -> None:
         self._listener.on_printer_logs(*lines)

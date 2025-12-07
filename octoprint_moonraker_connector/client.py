@@ -301,12 +301,19 @@ class MoonrakerClient(JsonRpcClient):
     HTTP_URL = "http://{host}:{port}"
 
     GENERIC_HEATER_PREFIX = "heater_generic "
+    GENERIC_EXTRUDER_PREFIX = "extruder"
+    GENERIC_TEMPERATURE_FAN_PREFIX = "temperature_fan "
+    GENERIC_TEMPERATURE_PROBE_PREFIX = "temperature_probe "
+    GENERIC_TEMPERATURE_SENSOR_PREFIX = "temperature_sensor "
+    GENERIC_TMC_PREFIX = "tmc"
+    TMC_HAVE_TEMPERATURE = [
+        "tmc2240",
+    ]
     MACRO_PREFIX = "gcode_macro "
 
     RELEVANT_PRINTER_OBJECTS = (
         "configfile",
         "display_status",
-        "extruder",
         "gcode_move",
         "heater_bed",
         "idle_timeout",
@@ -315,7 +322,12 @@ class MoonrakerClient(JsonRpcClient):
         lambda obj_list: [
             x
             for x in obj_list
-            if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+            if x.startswith(MoonrakerClient.GENERIC_EXTRUDER_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_TEMPERATURE_FAN_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_TEMPERATURE_PROBE_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_TEMPERATURE_SENSOR_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_TMC_PREFIX)
             or x.startswith(MoonrakerClient.MACRO_PREFIX)
         ],
     )
@@ -567,8 +579,13 @@ class MoonrakerClient(JsonRpcClient):
                     self._heaters = [
                         obj
                         for obj in matched_objs
-                        if obj in ("extruder", "heater_bed")
+                        if obj in ("heater_bed")
+                        or obj.startswith(self.GENERIC_EXTRUDER_PREFIX)
                         or obj.startswith(self.GENERIC_HEATER_PREFIX)
+                        or obj.startswith(self.GENERIC_TEMPERATURE_FAN_PREFIX)
+                        or obj.startswith(self.GENERIC_TEMPERATURE_PROBE_PREFIX)
+                        or obj.startswith(self.GENERIC_TEMPERATURE_SENSOR_PREFIX)
+                        or obj.startswith(self.GENERIC_TMC_PREFIX)
                     ]
 
                     self.query_printer_objects(matched_objs)
@@ -615,8 +632,8 @@ class MoonrakerClient(JsonRpcClient):
                 payload = result["status"]
                 self._process_query_result(payload)
 
-            except Exception:
-                self._logger.exception("Error while querying printer objects")
+            except Exception as e:
+                self._logger.exception(f"Error while querying printer objects: {e}")
 
         params = {"objects": dict.fromkeys(objs)}
         future = self.call_method("printer.objects.query", params=params)
@@ -1078,15 +1095,25 @@ class MoonrakerClient(JsonRpcClient):
             if heater not in payload:
                 continue
 
-            name = (
-                heater[len(self.GENERIC_HEATER_PREFIX) :]
-                if heater.startswith(self.GENERIC_HEATER_PREFIX)
-                else heater
-            )
+            if heater.startswith(self.GENERIC_HEATER_PREFIX):
+                name = heater[len(self.GENERIC_HEATER_PREFIX) :]
+            elif heater.startswith(self.GENERIC_TEMPERATURE_FAN_PREFIX):
+                name = heater[len(self.GENERIC_TEMPERATURE_FAN_PREFIX) :]
+            elif heater.startswith(self.GENERIC_TEMPERATURE_PROBE_PREFIX):
+                name = heater[len(self.GENERIC_TEMPERATURE_PROBE_PREFIX) :]
+            elif heater.startswith(self.GENERIC_TEMPERATURE_SENSOR_PREFIX):
+                name = heater[len(self.GENERIC_TEMPERATURE_SENSOR_PREFIX) :]
+            elif heater.startswith(self.GENERIC_TMC_PREFIX):
+                name = heater[8:]
+                driver = heater[:7]
+                if driver not in self.TMC_HAVE_TEMPERATURE:
+                    continue
+            else:
+                name = heater
 
             data = self._current_temperatures.get(name, TemperatureDataPoint())
             if "temperature" in payload[heater]:
-                data.actual = payload[heater]["temperature"]
+                data.actual = payload[heater]["temperature"] or 0
                 dirty_actual = True
             if "target" in payload[heater]:
                 data.target = payload[heater]["target"]
