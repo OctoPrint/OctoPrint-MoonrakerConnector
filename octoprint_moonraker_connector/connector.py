@@ -800,7 +800,7 @@ class ConnectedMoonrakerPrinter(
                     "Received a shutdown command from the printer, but processing of this command is disabled"
                 )
 
-        action_command = action + f" {params}" if params else ""
+        action_command = action + (f" {params}" if params else "")
         for name, hook in self._plugin_manager.get_hooks(
             "octoprint.comm.protocol.action"
         ).items():
