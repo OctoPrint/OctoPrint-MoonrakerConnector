@@ -398,8 +398,8 @@ class ConnectedMoonrakerPrinter(
             self.refresh_printer_files(recursive=recursive, blocking=True)
 
         result = []
-        for contents in self._client.current_tree.values():
-            children = [self._to_printer_file(f) for f in contents.values()]
+        for contents in list(self._client.current_tree.values()):
+            children = [self._to_printer_file(f) for f in list(contents.values())]
             result.extend(children)
         return result
 
