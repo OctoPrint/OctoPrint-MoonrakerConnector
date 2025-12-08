@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 from collections import defaultdict
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 import websocket
@@ -83,9 +83,13 @@ class JsonRpcServerError(JsonRpcError):
 class JsonRpcClient(websocket.WebSocketApp):
     JSONRPC_VERSION = "2.0"
 
-    def __init__(self, url: str, daemon=True, timeout=30):
+    def __init__(self, url: str, daemon=True, timeout=30, workers=3):
         self._daemon = daemon
         self._timeout = timeout
+        self._workers = workers
+
+        self._thread = None
+        self._response_executor = None
 
         logger_name = "octoprint.plugins.moonraker_connector.jsonrpc"
         self._logger = logging.getLogger(logger_name)
@@ -112,6 +116,10 @@ class JsonRpcClient(websocket.WebSocketApp):
         self._dual_log(logging.INFO, f"Connecting to {self.url}...")
         self._connect_future = Future()
 
+        self._response_executor = ThreadPoolExecutor(
+            max_workers=self._workers, thread_name_prefix="JSON RPC Connection Worker "
+        )
+
         self._thread = threading.Thread(
             target=self.connection_thread_runnable,
             name=f"JSONRPC Connection to {self.url}",
@@ -137,6 +145,10 @@ class JsonRpcClient(websocket.WebSocketApp):
 
     def disconnect(self):
         self._dual_log(logging.INFO, "Disconnecting...")
+
+        self._response_executor.shutdown(cancel_futures=True)
+        self._response_executor = None
+
         self._closing = True
         self.close()
 
@@ -148,9 +160,9 @@ class JsonRpcClient(websocket.WebSocketApp):
         payload = json.loads(message)
         if isinstance(payload, list):
             for p in payload:
-                self._process_message(p)
+                self._response_executor.submit(self._process_message, p)
         elif isinstance(payload, dict):
-            self._process_message(payload)
+            self._response_executor.submit(self._process_message, payload)
 
     def _process_message(self, message: dict):
         if message.get("jsonrpc") != self.JSONRPC_VERSION:
