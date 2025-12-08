@@ -64,6 +64,9 @@ EXTENSION_TO_THUMBNAIL_MIME = {
 }
 
 
+TRIGGER_TAG_FORMAT = "trigger:moonraker_connector.action_command.{action}"
+
+
 class ConnectedMoonrakerPrinter(
     ConnectedPrinter, PrinterFilesMixin, MoonrakerClientListener
 ):
@@ -753,22 +756,24 @@ class ConnectedMoonrakerPrinter(
     def on_moonraker_action_command(
         self, line: str, action: str, params: str = None
     ) -> None:
+        tags = {TRIGGER_TAG_FORMAT.format(action=action)}
+
         if action == "start":
             if self.get_current_job():
-                self.start_print()
+                self.start_print(tags=tags)
 
         elif action == "cancel":
-            self.cancel_print()
+            self.cancel_print(tags=tags)
 
         elif action == "pause":
-            self.pause_print()
+            self.pause_print(tags=tags)
 
         elif action == "paused":
             # already handled differently
             pass
 
         elif action == "resume":
-            self.resume_print()
+            self.resume_print(tags=tags)
 
         elif action == "resumed":
             # already handled differently
