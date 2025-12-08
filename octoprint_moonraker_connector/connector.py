@@ -370,6 +370,10 @@ class ConnectedMoonrakerPrinter(
         self._client.resume_print().result()
 
     def cancel_print(self, tags=None, *args, **kwargs):
+        if self.state == ConnectedPrinterState.CANCELLING:
+            # we are already cancelling
+            return
+
         self.state = ConnectedPrinterState.CANCELLING
         if self._plugin_settings.get_boolean(["emergency_stop_on_cancel"]):
             self._client.trigger_emergency_stop().result()
@@ -847,7 +851,11 @@ class ConnectedMoonrakerPrinter(
             elif (
                 self.state == ConnectedPrinterState.CANCELLING
                 and self._printer_state
-                in (PrinterState.CANCELLED, PrinterState.ERROR, PrinterState.STANDBY)
+                in (
+                    PrinterState.CANCELLED,
+                    PrinterState.ERROR,
+                    PrinterState.STANDBY,
+                )
             ):
                 # print failed
                 self._listener.on_printer_job_cancelled()
