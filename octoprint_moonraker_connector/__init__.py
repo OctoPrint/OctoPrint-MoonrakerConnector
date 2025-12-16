@@ -3,6 +3,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+import subprocess
 from flask import jsonify
 from flask_babel import gettext
 
@@ -92,6 +93,21 @@ class MoonrakerConnectorPlugin(
             webcams=[self._to_api_webcam(webcam) for webcam in webcams]
         )
         return jsonify(response.model_dump(by_alias=True))
+
+    def get_api_commands(self):
+        return dict(
+            restart_klipper_service=[]
+        )
+
+    def on_api_command(self, command, data):
+        if command == "restart_klipper_service":
+            if hasattr(self, "_client") and self._client.is_connected():
+                self._client.restart_klipper_service(self)
+            
+                return jsonify(success=True, message="Restart sent")
+            else:
+                self._logger.warning("Moonraker client not connected.")
+                return jsonify(success=False, message="Moonraker client not connected.")
 
     def is_api_protected(self):
         return True
