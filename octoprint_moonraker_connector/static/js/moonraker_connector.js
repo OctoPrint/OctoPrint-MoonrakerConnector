@@ -7,6 +7,58 @@ $(function () {
         self.settingsViewModel = parameters[2];
         self.printerState = parameters[3];
 
+        self.btnRestartClick = function() {
+            OctoPrint.control.sendGcode('RESTART');
+        }
+
+        self.btnFirmwareRestartClick = function() {
+            OctoPrint.control.sendGcode('FIRMWARE_RESTART');
+        }
+
+        self.initializeButton = function() {
+            var buttonContainer = $('#job_print')[0].parentElement;
+            var container = document.createElement("div");
+            container.classList.add("row-fluid", "print-control");
+            container.style.marginTop = "10px";
+            container.setAttribute("data-bind", "visible: $root.loginState.hasPermissionKo($root.access.permissions.PRINT)");
+
+            var btnRestart = document.createElement("button");
+            btnRestart.id = "job_restart";
+            btnRestart.title = "Reload configuration file and performs an internal reset of the host software. It does not clear the error state from the micro-controller.";
+            btnRestart.classList.add("btn");
+            btnRestart.classList.add("span6");
+            btnRestart.addEventListener("click", self.btnRestartClick);
+
+            var btnRestartIcon = document.createElement("i");
+            btnRestartIcon.classList.add("fa", "fa-redo");
+            btnRestart.appendChild(btnRestartIcon);
+
+            var btnRestartText = document.createElement("span");
+            btnRestartText.textContent = " Restart";
+            btnRestart.appendChild(btnRestartText);
+
+            container.appendChild(btnRestart);
+
+            var btnFirmwareRestart = document.createElement("button");
+            btnFirmwareRestart.id = "job_firmware_restart";
+            btnFirmwareRestart.title = "Reload configuration file and performs an internal reset of the host software, but it also clears any error states from the micro-controller.";
+            btnFirmwareRestart.classList.add("btn");
+            btnFirmwareRestart.classList.add("span6");
+            btnFirmwareRestart.addEventListener("click", self.btnFirmwareRestartClick);
+
+            var btnFirmwareRestartIcon = document.createElement("i");
+            btnFirmwareRestartIcon.classList.add("fa", "fa-sync");
+            btnFirmwareRestart.appendChild(btnFirmwareRestartIcon);
+
+            var btnFirmwareRestartText = document.createElement("span");
+            btnFirmwareRestartText.textContent = " Firmware Restart";
+            btnFirmwareRestart.appendChild(btnFirmwareRestartText);
+            
+            container.appendChild(btnFirmwareRestart);
+
+            buttonContainer.after(container);
+        };
+
         self.webcams = ko.observableArray([]);
         self.webcamAvailable = ko.pureComputed(() => {
             return self.webcams().length > 0;
@@ -135,6 +187,8 @@ $(function () {
                 function () {
                     self.requestData();
                 };
+
+        self.initializeButton();
     }
 
     OCTOPRINT_VIEWMODELS.push({
