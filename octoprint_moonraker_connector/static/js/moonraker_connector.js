@@ -26,7 +26,7 @@ $(function () {
 
         self.btnKlipperRestartClick = function() {
             showConfirmationDialog({
-                message: gettext("<strong>This will restart the Klipper service.</strong></p><p>This might disrupt any ongoing operations related to Klipper."),
+                message: "<strong>" + gettext("This will restart the Klipper service.") + "</strong></p><p>" + gettext("This might disrupt any ongoing operations related to Klipper."),
                 onproceed: function() {
                     OctoPrint.simpleApiCommand(
                         "moonraker_connector",
