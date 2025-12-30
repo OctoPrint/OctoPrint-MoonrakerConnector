@@ -621,17 +621,6 @@ class MoonrakerClient(JsonRpcClient):
 
     ##~~ Method calls & callbacks
 
-    def restart_klipper_service(self) -> Future:
-        def on_result(future: Future) -> None:
-            try:
-                results = future.result()
-            except Exception as e:
-                self._logger.exception(f"Error while restarting klipper service: {e}")
-
-        self.call_method("machine.service.restart", {"service": "klipper"}).add_done_callback(
-            on_result
-        )
-
     def query_printer_objects(self, objs: list[str] = None) -> Future:
         if objs is None:
             objs = self._subbed_objs
@@ -825,14 +814,6 @@ class MoonrakerClient(JsonRpcClient):
     def trigger_emergency_stop(self) -> Future:
         self._listener.on_moonraker_gcode_log("--- Triggering an Emergency Stop!")
         return self.call_method("printer.emergency_stop")
-
-    def trigger_host_restart(self) -> Future:
-        self._listener.on_moonraker_gcode_log(">>> RESTART")
-        return self.call_method("printer.restart")
-
-    def trigger_firmware_restart(self) -> Future:
-        self._listener.on_moonraker_gcode_log(">>> FIRMWARE_RESTART")
-        return self.call_method("printer.firmware_restart")
 
     # print job management
 

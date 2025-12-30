@@ -17,11 +17,69 @@ $(function () {
         });
 
         self.btnReloadConfigClick = function() {
-            OctoPrint.control.sendGcode('RESTART');
+            //OctoPrint.control.sendGcode('RESTART');
+            showConfirmationDialog({
+                message: gettext("<strong>This will restart the Klipper host.</strong></p><p>This might disrupt any ongoing operations related to Klipper."),
+                onproceed: function() {
+                    OctoPrint.simpleApiCommand(
+                        "moonraker_connector",
+                        "restart_host"
+                    ).done(function(response) {
+                        if (response.success) {
+                            new PNotify({
+                                title: gettext("Success"),
+                                text: gettext("Klipper host restart command sent"),
+                                type: "success"
+                            });
+                        } else {
+                            new PNotify({
+                                title: gettext("Failed"),
+                                text: gettext("Failed to send Klipper host restart command: ") + response.message,
+                                type: "error"
+                            });
+                        }
+                    }).fail(function(jqXHR, textStatus, errorThrown) {
+                        new PNotify({
+                            title: gettext("Error"),
+                            text: gettext("Failed to execute command: ") + jqXHR.responseJSON.message,
+                            type: "error"
+                        });
+                    });
+                }
+            });
         }
 
         self.btnFirmwareRestartClick = function() {
-            OctoPrint.control.sendGcode('FIRMWARE_RESTART');
+            //OctoPrint.control.sendGcode('FIRMWARE_RESTART');
+            showConfirmationDialog({
+                message: gettext("<strong>This will restart the Klipper firmware.</strong></p><p>This might disrupt any ongoing operations related to Klipper."),
+                onproceed: function() {
+                    OctoPrint.simpleApiCommand(
+                        "moonraker_connector",
+                        "restart_firmware"
+                    ).done(function(response) {
+                        if (response.success) {
+                            new PNotify({
+                                title: gettext("Success"),
+                                text: gettext("Klipper firmware restart command sent"),
+                                type: "success"
+                            });
+                        } else {
+                            new PNotify({
+                                title: gettext("Failed"),
+                                text: gettext("Failed to send Klipper firmware restart command: ") + response.message,
+                                type: "error"
+                            });
+                        }
+                    }).fail(function(jqXHR, textStatus, errorThrown) {
+                        new PNotify({
+                            title: gettext("Error"),
+                            text: gettext("Failed to execute command: ") + jqXHR.responseJSON.message,
+                            type: "error"
+                        });
+                    });
+                }
+            });
         }
 
         self.btnKlipperRestartClick = function() {
@@ -35,13 +93,13 @@ $(function () {
                         if (response.success) {
                             new PNotify({
                                 title: gettext("Success"),
-                                text: gettext("Restart command sent"),
+                                text: gettext("Klipper service restart command sent"),
                                 type: "success"
                             });
                         } else {
                             new PNotify({
                                 title: gettext("Failed"),
-                                text: gettext("Failed to send restart command: ") + response.message,
+                                text: gettext("Failed to send Klipper service restart command: ") + response.message,
                                 type: "error"
                             });
                         }
@@ -65,14 +123,14 @@ $(function () {
             var container = document.createElement("div");
             container.classList.add("row-fluid", "print-control");
             container.style.marginTop = "10px";
-            container.setAttribute("data-bind", "visible: isOperational() && loginState.isUser()");
+            // container.setAttribute("data-bind", "visible: isOperational() && loginState.isUser()");
 
             var btnReloadConfig = document.createElement("button");
             btnReloadConfig.id = "job_reload_config";
             btnReloadConfig.title = gettext("Reload configuration file and performs an internal reset of the host software. It does not clear the error state from the micro-controller.");
             btnReloadConfig.classList.add("btn");
             btnReloadConfig.classList.add("span6");
-            btnReloadConfig.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
+            // btnReloadConfig.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
             btnReloadConfig.addEventListener("click", self.btnReloadConfigClick);
 
             var btnReloadConfigIcon = document.createElement("i");
@@ -91,7 +149,7 @@ $(function () {
             btnFirmwareRestart.title = gettext("Reload configuration file and performs an internal reset of the host software, but it also clears any error states from the micro-controller.");
             btnFirmwareRestart.classList.add("btn");
             btnFirmwareRestart.classList.add("span6");
-            btnFirmwareRestart.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
+            // btnFirmwareRestart.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
             btnFirmwareRestart.addEventListener("click", self.btnFirmwareRestartClick);
 
             var btnFirmwareRestartIcon = document.createElement("i");
@@ -110,14 +168,14 @@ $(function () {
             var container2 = document.createElement("div");
             container2.classList.add("row-fluid", "print-control");
             container2.style.marginTop = "10px";
-            container2.setAttribute("data-bind", "visible: isOperational() && loginState.isUser()");
+            // container2.setAttribute("data-bind", "visible: isOperational() && loginState.isUser()");
 
             var btnKlipperRestart = document.createElement("button");
             btnKlipperRestart.id = "job_klipper_restart";
             btnKlipperRestart.title = gettext("Restart klipper process.");
             btnKlipperRestart.classList.add("btn");
             btnKlipperRestart.classList.add("span12");
-            btnKlipperRestart.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
+            // btnKlipperRestart.setAttribute("data-bind", "enable: isOperational() && loginState.isUser()");
             btnKlipperRestart.addEventListener("click", self.btnKlipperRestartClick);
 
             var btnKlipperRestartIcon = document.createElement("i");
