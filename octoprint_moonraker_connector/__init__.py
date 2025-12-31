@@ -3,6 +3,7 @@ from typing import Optional
 from urllib.parse import urljoin
 
 import requests
+import subprocess
 from flask import jsonify
 from flask_babel import gettext
 
@@ -12,6 +13,9 @@ from octoprint.util.url import set_url_query_param
 
 from . import schema
 
+URL_KLIPPER_RESTART_MOONRAKER = "http://{host}:{port}/machine/services/restart"
+URL_FIRMWARE_RESTART_MOONRAKER = "http://{host}:{port}/printer/firmware_restart"
+URL_HOST_RESTART_MOONRAKER = "http://{host}:{port}/printer/restart"
 URL_WEBCAM_INFO_MOONRAKER = "http://{host}:{port}/server/webcams/list"
 URL_WEBCAM_INFO_FLUIDD_LEGACY = (
     "http://{host}:{port}/server/database/item?namespace=fluidd&key=cameras"
@@ -92,6 +96,82 @@ class MoonrakerConnectorPlugin(
             webcams=[self._to_api_webcam(webcam) for webcam in webcams]
         )
         return jsonify(response.model_dump(by_alias=True))
+
+    def get_api_commands(self):
+        return dict(
+            restart_host=[],
+            restart_firmware=[],
+            restart_klipper_service=[]
+        )
+
+    def on_api_command(self, command, data):
+        if command == "restart_host":
+            params = self._get_connector_params()
+            if params is not None:
+                host = params["host"]
+                port = params["port"]
+                apikey = params["apikey"]
+
+                if host is not None and port is not None:
+                    headers = {}
+                    if apikey:
+                        headers["X-Api-Key"] = apikey
+
+                    r = requests.post(
+                        URL_HOST_RESTART_MOONRAKER.format(host=host, port=port), headers=headers
+                    )
+                    ret = r.json()
+
+            if ret['result'] == "ok":
+                return jsonify(success=True, message="Host Restart sent")
+            else:
+                return jsonify(success=False, message="Host Restart failed")
+        elif command == "restart_firmware":
+            params = self._get_connector_params()
+            if params is not None:
+                host = params["host"]
+                port = params["port"]
+                apikey = params["apikey"]
+
+                if host is not None and port is not None:
+                    headers = {}
+                    if apikey:
+                        headers["X-Api-Key"] = apikey
+
+                    r = requests.post(
+                        URL_FIRMWARE_RESTART_MOONRAKER.format(host=host, port=port), headers=headers
+                    )
+                    ret = r.json()
+
+            if ret['result'] == "ok":
+                return jsonify(success=True, message="Firmware Restart sent")
+            else:
+                return jsonify(success=False, message="Firmware Restart failed")
+        if command == "restart_klipper_service":
+            params = self._get_connector_params()
+            if params is not None:
+                host = params["host"]
+                port = params["port"]
+                apikey = params["apikey"]
+
+                if host is not None and port is not None:
+                    headers = {}
+                    if apikey:
+                        headers["X-Api-Key"] = apikey
+
+                    payload = {
+                        "service": "klipper"
+                    }
+
+                    r = requests.post(
+                        URL_KLIPPER_RESTART_MOONRAKER.format(host=host, port=port), headers=headers, json=payload
+                    )
+                    ret = r.json()
+
+            if ret['result'] == "ok":
+                return jsonify(success=True, message="Klipper Restart sent")
+            else:
+                return jsonify(success=False, message="Klipper Restart failed")
 
     def is_api_protected(self):
         return True

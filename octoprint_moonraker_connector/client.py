@@ -138,18 +138,27 @@ class Configfile(BaseModel):
 
 
 class TemperatureDataPoint:
+    type: str = "temperature_sensor"
+    id: str = ""
+    hadTarget: bool = True
     actual: float = 0.0
     target: float = 0.0
 
-    def __init__(self, actual: float = 0.0, target: float = 0.0):
+    def __init__(self, type: str = "temperature_sensor", id: str = "", hasTarget: bool = True, actual: float = 0.0, target: float = 0.0):
+        self.type = type
+        self.id = id
+        self.hasTarget = hasTarget
         self.actual = actual
         self.target = target
 
     def __str__(self):
-        return f"{self.actual} / {self.target}"
+        if self.hasTarget:
+            return f"{self.actual} / {self.target}"
+        else:
+            return f"{self.actual}"
 
     def __repr__(self):
-        return f"TemperatureDataPoint({self.actual}, {self.target})"
+        return f"TemperatureDataPoint({self.type}, {self.id}, {self.hasTarget}, {self.actual}, {self.target})"
 
 
 class KlipperState(enum.Enum):
@@ -245,6 +254,11 @@ class MoonrakerClientListener:
     def on_moonraker_server_info(self, server_info: dict[str, Any]) -> None:
         pass
 
+    def on_moonraker_temperature_store_update(
+        self, data: dict[str, TemperatureDataPoint]
+    ) -> None:
+        pass
+
     def on_moonraker_file_tree_updated(
         self, root: str, path: str, tree: dict[str, dict[str, InternalFile]]
     ) -> None:
@@ -300,13 +314,17 @@ class MoonrakerClient(JsonRpcClient):
     WEBSOCKET_URL = "ws://{host}:{port}/websocket"
     HTTP_URL = "http://{host}:{port}"
 
-    GENERIC_HEATER_PREFIX = "heater_generic "
+    GENERIC_EXTRUDER_PREFIX = "extruder"
+    GENERIC_TMC_PREFIX = "tmc"
+    TMC_HAVE_TEMPERATURE = [
+        "tmc2240",
+    ]
+    HEATERS = ();
     MACRO_PREFIX = "gcode_macro "
 
     RELEVANT_PRINTER_OBJECTS = (
         "configfile",
         "display_status",
-        "extruder",
         "gcode_move",
         "heater_bed",
         "idle_timeout",
@@ -315,7 +333,8 @@ class MoonrakerClient(JsonRpcClient):
         lambda obj_list: [
             x
             for x in obj_list
-            if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
+            if x.startswith(MoonrakerClient.GENERIC_EXTRUDER_PREFIX)
+            or x.startswith(MoonrakerClient.GENERIC_TMC_PREFIX)
             or x.startswith(MoonrakerClient.MACRO_PREFIX)
         ],
     )
@@ -343,6 +362,7 @@ class MoonrakerClient(JsonRpcClient):
         self._klipper_state_subscription = False
         self._subbed_objs: list[str] = []
 
+        self._temperature_store_received = False
         self._log_history_received = False
 
         self._heaters: list[str] = []
@@ -515,9 +535,10 @@ class MoonrakerClient(JsonRpcClient):
                         f"Connected to Moonraker {moonraker_version}, API version {api_version}",
                     )
 
+                    self.get_printer_config()
                     self.fetch_console_history()
                     self.fetch_job_history()
-                    self.subscribe_to_updates()
+                    #self.subscribe_to_updates()
 
                 else:
                     # log error
@@ -526,7 +547,7 @@ class MoonrakerClient(JsonRpcClient):
                     self._dual_log(logging.ERROR, error)
 
             except Exception as exc:
-                self._logger.exception("Error while retrieving server info")
+                self._logger.exception(f"Error while retrieving server info: {exc}")
                 error_str = f"Error while retrieving server info: {str(exc)}. Please check moonraker.log for details."
                 self._listener.on_moonraker_disconnected(error=error_str)
 
@@ -548,7 +569,7 @@ class MoonrakerClient(JsonRpcClient):
                 obj_list = printer_objects.get("objects", [])
 
                 matched_objs = []
-                for obj in self.RELEVANT_PRINTER_OBJECTS:
+                for obj in self.RELEVANT_PRINTER_OBJECTS + self.HEATERS:
                     if isinstance(obj, str) and obj in obj_list:
                         matched_objs.append(obj)
 
@@ -567,8 +588,10 @@ class MoonrakerClient(JsonRpcClient):
                     self._heaters = [
                         obj
                         for obj in matched_objs
-                        if obj in ("extruder", "heater_bed")
-                        or obj.startswith(self.GENERIC_HEATER_PREFIX)
+                        if obj in ("heater_bed")
+                        or obj.startswith(self.GENERIC_EXTRUDER_PREFIX)
+                        or obj.startswith(self.GENERIC_TMC_PREFIX)
+                        or obj in self.HEATERS
                     ]
 
                     self.query_printer_objects(matched_objs)
@@ -615,13 +638,28 @@ class MoonrakerClient(JsonRpcClient):
                 payload = result["status"]
                 self._process_query_result(payload)
 
-            except Exception:
-                self._logger.exception("Error while querying printer objects")
+            except Exception as e:
+                self._logger.exception(f"Error while querying printer objects: {e}")
 
         params = {"objects": dict.fromkeys(objs)}
         future = self.call_method("printer.objects.query", params=params)
         future.add_done_callback(on_result)
         return future
+
+    def get_printer_config(self) -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                results = future.result()
+
+                config = results["status"]["configfile"]["config"]
+                self.fetch_temperature_store(config=config)
+            except Exception as e:
+                self._logger.exception(f"Error while fetching klipper config: {e}")
+
+        params = {"objects": {"configfile": None}}
+        self.call_method("printer.objects.query", params=params).add_done_callback(
+            on_result
+        )
 
     def subscribe_printer_objects(self, objs: list[str] = None) -> Future:
         if objs is None:
@@ -656,6 +694,53 @@ class MoonrakerClient(JsonRpcClient):
             on_status
         )
         return result_future
+
+    def fetch_temperature_store(self, config: dict) -> Future:
+        def on_result(future: Future) -> None:
+            try:
+                results = future.result()
+                for section in results:
+                    if section.startswith(self.GENERIC_EXTRUDER_PREFIX):
+                        continue;
+
+                    if section not in config:
+                        self._logger.warning(f"{section} not found in config")
+                        continue
+
+                    sectionconfig = config[section]
+                    if "gcode_id" not in sectionconfig:
+                        self._logger.warning(f"skipping {section}, no gcode_id")
+                        continue
+
+                    if " " in section:
+                        type, name = section.split(maxsplit=1)
+                    else:
+                        type = ""
+                        name = section
+
+                    if name not in self._current_temperatures:
+                        self._current_temperatures[name] = TemperatureDataPoint(
+                            type=type,
+                            id=sectionconfig["gcode_id"],
+                            hasTarget=True if "target" in sectionconfig else False
+                        )
+
+                    if section not in self.HEATERS:
+                        self.HEATERS += (section,)
+
+                    if section not in self._heaters:
+                        self._heaters.append(section)
+ 
+                self._temperature_store_received = True
+                self._listener.on_moonraker_temperature_store_update(self._current_temperatures)
+                self.subscribe_to_updates()
+
+            except Exception as e:
+                self._logger.exception(f"Error while fetching temperature store: {e}")
+
+        self.call_method("server.temperature_store").add_done_callback(
+            on_result
+        )
 
     def fetch_console_history(self, count: int = 100, force: bool = False) -> Future:
         if self._log_history_received and not force:
@@ -729,14 +814,6 @@ class MoonrakerClient(JsonRpcClient):
     def trigger_emergency_stop(self) -> Future:
         self._listener.on_moonraker_gcode_log("--- Triggering an Emergency Stop!")
         return self.call_method("printer.emergency_stop")
-
-    def trigger_host_restart(self) -> Future:
-        self._listener.on_moonraker_gcode_log(">>> RESTART")
-        return self.call_method("printer.restart")
-
-    def trigger_firmware_restart(self) -> Future:
-        self._listener.on_moonraker_gcode_log(">>> FIRMWARE_RESTART")
-        return self.call_method("printer.firmware_restart")
 
     # print job management
 
@@ -1067,31 +1144,49 @@ class MoonrakerClient(JsonRpcClient):
         self._update_gcode_move(payload)
         self._update_idle_timeout(payload)
         self._update_print_stats(payload)
-        self._update_temperatures(payload)
+        if self._temperature_store_received:
+            self._update_temperatures(payload)
         self._update_virtual_sdcard(payload)
 
     def _update_temperatures(self, payload: dict[str, Any]) -> None:
         dirty_actual = False
         dirty_target = False
+        dirty_sensorslist = False
 
         for heater in self._heaters:
             if heater not in payload:
                 continue
 
-            name = (
-                heater[len(self.GENERIC_HEATER_PREFIX) :]
-                if heater.startswith(self.GENERIC_HEATER_PREFIX)
-                else heater
-            )
+            if " " in heater:
+                type, name = heater.split(maxsplit=1)
+            else:
+                type = ""
+                name = heater
 
-            data = self._current_temperatures.get(name, TemperatureDataPoint())
+            if heater.startswith(self.GENERIC_TMC_PREFIX) and type not in self.TMC_HAVE_TEMPERATURE:
+                continue
+
+            if name not in self._current_temperatures:
+                dirty_sensorslist = True
+                self._logger.warning(f"Adding {heater} to temperatures list")
+
+            data = self._current_temperatures.get(name, TemperatureDataPoint(type=type))
+
+            if heater.startswith(self.GENERIC_TMC_PREFIX) and data.hasTarget:
+                data.hasTarget = False
+
             if "temperature" in payload[heater]:
-                data.actual = payload[heater]["temperature"]
+                data.actual = payload[heater]["temperature"] or 0
                 dirty_actual = True
             if "target" in payload[heater]:
                 data.target = payload[heater]["target"]
                 dirty_target = True
             self._current_temperatures[name] = data
+            if data.id == "C" and name != "chamber":
+                self._current_temperatures["chamber"] = data
+
+        if dirty_sensorslist:
+            self._listener.on_moonraker_temperature_store_update(self._current_temperatures)
 
         if dirty_actual or dirty_target:
             now = time.monotonic()
