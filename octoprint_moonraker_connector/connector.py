@@ -593,14 +593,13 @@ class ConnectedMoonrakerPrinter(
         self._event_bus.fire(Events.DISCONNECTED)
 
     def on_moonraker_server_info(self, server_info):
-        firmware_info = FirmwareInformation(
-            name="Klipper",
+        self.firmware_info = FirmwareInformation(
+            name="Klipper (via Moonraker)",
             data={
                 "moonraker_version": server_info.get("moonraker_version", "unknown"),
                 "api_version": server_info.get("api_version_string", "0.0.0"),
             },
         )
-        self._listener.on_printer_firmware_info(firmware_info)
 
     def on_moonraker_temperature_update(
         self, data: dict[str, TemperatureDataPoint]
