@@ -457,17 +457,15 @@ class ConnectedMoonrakerPrinter(
     def upload_printer_file(
         self, source, target, progress_callback: callable = None, *args, **kwargs
     ) -> str:
-        def on_upload_done(future: Future) -> None:
-            try:
-                future.result()
-                if callable(progress_callback):
-                    progress_callback(done=True)
-            except Exception:
-                if callable(progress_callback):
-                    progress_callback(failed=True)
-                self._logger.exception(f"Uploading to {target} failed")
+        try:
+            self._client.upload_file(source, target).result()
+            if callable(progress_callback):
+                progress_callback(done=True)
+        except Exception:
+            if callable(progress_callback):
+                progress_callback(failed=True)
+            raise
 
-        self._client.upload_file(source, target).add_done_callback(on_upload_done)
         return target
 
     def download_printer_file(self, path, *args, **kwargs) -> IO:
