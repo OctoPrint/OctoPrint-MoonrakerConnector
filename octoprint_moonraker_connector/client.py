@@ -359,6 +359,8 @@ class MoonrakerClient(JsonRpcClient):
 
         self._handshake_attempt = 0
 
+        self._upload_lock = threading.RLock()
+
     @property
     def klipper_state(self) -> KlipperState:
         return self._klipper_state
@@ -895,12 +897,18 @@ class MoonrakerClient(JsonRpcClient):
                     + "/server/files/upload"
                 )
 
-                response = requests.post(
-                    url,
-                    headers=headers,
-                    files={"file": (filename, handle)},
-                    data={"root": root, "path": folder},
-                )
+                with self._upload_lock:
+                    # The upload endpoint on Moonraker doesn't appear to be thread safe, at least not on my test device...
+                    # So let's make sure we never try to run two upload requests in parallel. This is kinda weird, but
+                    # we even if that is fixed in current versions (haven't checked...), given that Moonraker just like
+                    # Marlin before it now gets rolled out with sold printers out there and then probably never updated
+                    # again by the user, we need a workaround.
+                    response = requests.post(
+                        url,
+                        headers=headers,
+                        files={"file": (filename, handle)},
+                        data={"root": root, "path": folder},
+                    )
                 response.raise_for_status()
 
                 future.set_result(True)
