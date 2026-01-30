@@ -108,7 +108,7 @@ class ConnectedMoonrakerPrinter(
         host = params.get("host")
         return host and resolve_host(host)
 
-    TEMPERATURE_LOOKUP = {"extruder": "tool0", "heater_bed": "bed", "chamber": "chamber"}
+    TEMPERATURE_LOOKUP = {}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -601,15 +601,39 @@ class ConnectedMoonrakerPrinter(
             },
         )
 
+    def on_moonraker_temperature_store_update(
+        self, data: dict[str, TemperatureDataPoint]
+    ) -> None:
+        # rebuild the list, if we are here we reloaded and something
+        # could have changed
+        self.TEMPERATURE_LOOKUP = {"extruder": "tool0", "heater_bed": "bed"}
+        extruder_count = self._profile["extruder"]["count"]
+        if extruder_count > 1:
+            for i in range(1, extruder_count):
+                if f"extruder{i}" not in self.TEMPERATURE_LOOKUP:
+                    self.TEMPERATURE_LOOKUP[f"extruder{i}"] = f"tool{i}"
+
+        mapped_data = {}
+        for key, value in data.items():
+            if key not in self.TEMPERATURE_LOOKUP:
+                if "id" in key and key[id].upper() == "C":
+                    self.TEMPERATURE_LOOKUP[key] = "chamber"
+                else:
+                    self.TEMPERATURE_LOOKUP[key] = key
+            new_key = self.TEMPERATURE_LOOKUP.get(key)
+            if new_key is not None:
+                mapped_data[new_key] = (value.actual, value.target)
+        self._listener.on_printer_temperature_update(mapped_data)
+
     def on_moonraker_temperature_update(
         self, data: dict[str, TemperatureDataPoint]
     ) -> None:
-        self._listener.on_printer_temperature_update(
-            {
-                self.TEMPERATURE_LOOKUP.get(key): (value.actual, value.target)
-                for key, value in data.items()
-            }
-        )
+        mapped_data = {}
+        for key, value in data.items():
+            new_key = self.TEMPERATURE_LOOKUP.get(key)
+            if new_key is not None:
+                mapped_data[new_key] = (value.actual, value.target)
+        self._listener.on_printer_temperature_update(mapped_data)
 
     def on_moonraker_gcode_log(self, *lines: str) -> None:
         self._listener.on_printer_logs(*lines)
