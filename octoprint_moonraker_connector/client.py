@@ -302,14 +302,18 @@ class MoonrakerClient(JsonRpcClient):
 
     GENERIC_HEATER_PREFIX = "heater_generic "
     MACRO_PREFIX = "gcode_macro "
+    FILAMENT_SWITCH_SENSOR_PREFIX = "filament_switch_sensor "
+    FILAMENT_MOTION_SENSOR_PREFIX = "filament_motion_sensor "
 
     RELEVANT_PRINTER_OBJECTS = (
         "configfile",
         "display_status",
         "extruder",
         "gcode_move",
+        "hall_filament_width_sensor",
         "heater_bed",
         "idle_timeout",
+        "pause_resume",
         "print_stats",
         "virtual_sdcard",
         lambda obj_list: [
@@ -317,6 +321,8 @@ class MoonrakerClient(JsonRpcClient):
             for x in obj_list
             if x.startswith(MoonrakerClient.GENERIC_HEATER_PREFIX)
             or x.startswith(MoonrakerClient.MACRO_PREFIX)
+            or x.startswith(MoonrakerClient.FILAMENT_SWITCH_SENSOR_PREFIX)
+            or x.startswith(MoonrakerClient.FILAMENT_MOTION_SENSOR_PREFIX)
         ],
     )
 
