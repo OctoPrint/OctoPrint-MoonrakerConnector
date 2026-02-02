@@ -757,11 +757,49 @@ class MoonrakerClient(JsonRpcClient):
     # file management
 
     def _refresh_tree(
-        self, root="gcodes", path="", recursive=False, parent: Optional[DirInfo] = None
+        self,
+        root="gcodes",
+        path="",
+        recursive=False,
+        parent: Optional[DirInfo] = None,
+        modified: bool = False,
     ) -> Future:
         refresh_tree_result = Future()
 
+        if root not in ("gcodes"):
+            exc = ValueError(f"refreshed root {root} is currently not supported")
+            refresh_tree_result.set_exception(exc)
+            return refresh_tree_result
+
+        def update_parent_info(timestamp: Optional[float] = None) -> None:
+            nonlocal path
+
+            tree = self._current_tree.get(path)
+            if not tree:
+                return
+
+            p = tree.get(".")
+            if not p:
+                return
+
+            total = 0
+            last_modified = -1
+            for name, item in tree.items():
+                if name == ".":
+                    continue
+                total += item.size
+                if item.modified > last_modified:
+                    last_modified = item.modified
+
+            p.modified = timestamp if timestamp else last_modified
+            p.size = total
+
         def on_result(future: Future) -> None:
+            nonlocal path
+            nonlocal parent
+            nonlocal recursive
+            nonlocal modified
+
             try:
                 info = future.result()
 
@@ -773,9 +811,14 @@ class MoonrakerClient(JsonRpcClient):
                     InternalFile(path=f"{prefix}{f['filename']}", **f)
                     for f in info.get("files")
                 ]
+
+                dot_entry = self._current_tree.get(path, {}).get(
+                    "."
+                )  # rescue . before replacing subtree
                 self._current_tree[path] = {f.filename: f for f in internal_files}
 
                 if parent:
+                    # add . from provided parent
                     self._current_tree[path]["."] = InternalFile(
                         path=f"{prefix}.",
                         filename=".",
@@ -783,6 +826,9 @@ class MoonrakerClient(JsonRpcClient):
                         size=parent.size,
                         permissions=parent.permissions,
                     )
+                elif dot_entry:
+                    # recover . from rescued one
+                    self._current_tree[path]["."] = dot_entry
 
                 dirs = [
                     DirInfo(**d)
@@ -808,12 +854,16 @@ class MoonrakerClient(JsonRpcClient):
                             refresh_tree_result.set_exception(exc)
 
                         if len(futures) == 0:
+                            update_parent_info(
+                                timestamp=time.time() if modified else None
+                            )
                             refresh_tree_result.set_result(self._current_tree)
 
                     for f in futures:
                         f.add_done_callback(fetched)
 
                 else:
+                    update_parent_info(timestamp=time.time() if modified else None)
                     refresh_tree_result.set_result(self._current_tree)
 
             except Exception as exc:
@@ -830,7 +880,9 @@ class MoonrakerClient(JsonRpcClient):
 
         return refresh_tree_result
 
-    def refresh_tree(self, root="gcodes", path="", recursive=False) -> Future:
+    def refresh_tree(
+        self, root="gcodes", path="", recursive=False, modified=False
+    ) -> Future:
         def on_result(future: Future) -> None:
             try:
                 tree = future.result()
@@ -840,7 +892,9 @@ class MoonrakerClient(JsonRpcClient):
                     f"Error while fetching file tree for {root}{' and path {path}' if path else ''}"
                 )
 
-        future = self._refresh_tree(root=root, path=path, recursive=recursive)
+        future = self._refresh_tree(
+            root=root, path=path, recursive=recursive, modified=modified
+        )
         future.add_done_callback(on_result)
         return future
 
@@ -1044,7 +1098,7 @@ class MoonrakerClient(JsonRpcClient):
                 enqueue_refresh(source_item, target_parent=(action.endswith("_file")))
 
         for root, path in to_refresh:
-            self.refresh_tree(root=root, path=path, recursive=False)
+            self.refresh_tree(root=root, path=path, recursive=False, modified=True)
 
     def on_gcode_response(self, _, params):
         self._listener.on_moonraker_gcode_log(
