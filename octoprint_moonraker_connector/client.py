@@ -788,7 +788,8 @@ class MoonrakerClient(JsonRpcClient):
                 if item.modified > last_modified:
                     last_modified = item.modified
 
-            p.modified = timestamp if timestamp else last_modified
+            if timestamp or last_modified >= 0:
+                p.modified = timestamp if timestamp else last_modified
             p.size = total
 
         def on_result(future: Future) -> None:
