@@ -22,18 +22,10 @@ class ThumbnailInfo(BaseModel):
     relative_path: str
 
 
-class FileInfo(BaseModel):
-    path: str
-    modified: float
-    size: int
-    permissions: str
-
-
 class ExtendedFileInfo(BaseModelExtra):
     filename: str
     modified: float
     size: int
-    permissions: str
 
     estimated_time: Optional[float] = None
     nozzle_diameter: Optional[float] = None
@@ -45,11 +37,10 @@ class InternalFile(ExtendedFileInfo):
     path: str
 
 
-class DirInfo(BaseModel):
+class DirInfo(BaseModelExtra):
     dirname: str
     modified: float
     size: int
-    permissions: str
 
 
 class DiskUsage(BaseModel):
@@ -830,11 +821,17 @@ class MoonrakerClient(JsonRpcClient):
                         filename=".",
                         modified=parent.modified,
                         size=parent.size,
-                        permissions=parent.permissions,
                     )
                 elif dot_entry:
                     # recover . from rescued one
                     self._current_tree[path]["."] = dot_entry
+                else:
+                    self._current_tree[path]["."] = InternalFile(
+                        path=f"{prefix}.",
+                        filename=".",
+                        modified=time.time(),
+                        size=0,
+                    )
 
                 dirs = [
                     DirInfo(**d)
