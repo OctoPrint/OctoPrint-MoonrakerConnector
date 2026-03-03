@@ -489,8 +489,8 @@ class ConnectedMoonrakerPrinter(
 
         return self._get_metadata_entry_for_file(internal)
 
-    def has_thumbnail(self, path, *args, **kwargs):
-        internal = self._get_internal_file(path)
+    def has_thumbnail(self, path, *args, refresh=False, **kwargs):
+        internal = self._get_internal_file(path, refresh=refresh)
         return internal and internal.thumbnails
 
     def get_thumbnail(
@@ -526,6 +526,16 @@ class ConnectedMoonrakerPrinter(
             meta.last_modified = lm
 
         return meta, response.raw
+
+    def refresh_thumbnails(
+        self, path: str, force: bool = False, recursive: bool = False
+    ) -> None:
+        if path in self._client.current_tree:
+            # directory
+            self._client.refresh_tree(path=path, recursive=recursive).result()
+        else:
+            # file
+            self.has_thumbnail(path, refresh=True)
 
     def _to_storage_thumbnail(
         self, thumbnail: ThumbnailInfo, printable: str
