@@ -119,6 +119,25 @@ $(function () {
             self.webcams([cam]);
         };
 
+        self.onRenderParametersForConnector = (connector, parameters) => {
+            if (connector !== "moonraker") return false;
+
+            return [
+                {
+                    name: gettext("Host"),
+                    value: parameters.host || "-"
+                },
+                {
+                    name: gettext("Port"),
+                    value: parameters.port || 7125
+                },
+                {
+                    name: gettext("API Key"),
+                    value: parameters.apikey ? "***" : "-"
+                }
+            ];
+        };
+
         self.onWebcamRefresh = function () {
             self.requestData();
         };
