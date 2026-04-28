@@ -582,7 +582,7 @@ class ConnectedMoonrakerPrinter(
         self._event_bus.fire(
             Events.CONNECTED,
             {
-                "connector": self.name,
+                "connector": self.connector,
                 "host": self._host,
                 "port": self._port,
                 "apikey": self._apikey is not None,
