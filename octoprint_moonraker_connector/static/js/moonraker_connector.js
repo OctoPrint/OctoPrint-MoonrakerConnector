@@ -138,6 +138,11 @@ $(function () {
             ];
         };
 
+        self.onReevaluateConnectionParameters = (connector) => {
+            if (connector !== "moonraker") return;
+            return true;
+        };
+
         self.onWebcamRefresh = function () {
             self.requestData();
         };
