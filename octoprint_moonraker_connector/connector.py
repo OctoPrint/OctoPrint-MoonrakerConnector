@@ -177,7 +177,6 @@ class ConnectedMoonrakerPrinter(
     def disconnect(self, *args, **kwargs):
         if self._client is None:
             return
-        self._event_bus.fire(Events.DISCONNECTING)
         self._client.disconnect()
 
     def emergency_stop(self, *args, **kwargs):
