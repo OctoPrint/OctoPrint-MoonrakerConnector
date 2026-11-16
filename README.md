@@ -6,6 +6,8 @@
 
 Connector plugin to allow connecting to Moonraker enabled Klipper based printers.
 
+Supports connecting, print start & monitoring, file management, macro access, webcam access.
+
 Successfully tested against:
 
 - Qidi Q1 Pro
