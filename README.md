@@ -2,9 +2,17 @@
 >
 > This plugin requires OctoPrint 2.0.0 and is still a work in progress.
 
-# OctoPrint-MoonrakerConnector
+# Moonraker Connector
 
 Connector plugin to allow connecting to Moonraker enabled Klipper based printers.
+
+Successfully tested against:
+
+- Qidi Q1 Pro
+- Snapmaker U1
+
+This is still a work in progress, please report back any issues or successful tests
+at [the plugin's issue tracker](https://github.com/OctoPrint/OctoPrint-MoonrakerConnector/issues).
 
 ## Setup
 
