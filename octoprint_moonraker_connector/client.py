@@ -358,6 +358,8 @@ class MoonrakerClient(JsonRpcClient):
 
         self._upload_lock = threading.RLock()
 
+        self._masked_parameters = ["api_key"]
+
     @property
     def klipper_state(self) -> KlipperState:
         return self._klipper_state

@@ -104,6 +104,8 @@ class JsonRpcClient(websocket.WebSocketApp):
         self._msgid_lock = threading.RLock()
         self._msgid_counter = 0
 
+        self._masked_parameters = []
+
         super().__init__(
             url=url,
             on_open=self.on_open,
@@ -240,8 +242,17 @@ class JsonRpcClient(websocket.WebSocketApp):
         if params:
             payload["params"] = params
 
+        if params:
+            masked_params = {
+                key: (value if key not in self._masked_parameters else "*****")
+                for key, value in params.items()
+            }
+        else:
+            masked_params = params
+
         self._dual_log(
-            logging.DEBUG, f"Calling method {method} (id {msgid}), params: {params!r}"
+            logging.DEBUG,
+            f"Calling method {method} (id {msgid}), params: {masked_params!r}",
         )
 
         def on_done(f: Future) -> None:
