@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "OctoPrint-MoonrakerConnector"
-version = "0.1.0"
+version = "0.1.1"
 description = "Connector plugin to allow connecting to Moonraker enabled Klipper based printers"
 authors = [
     {name = "Gina Häußge", email = "gina@octoprint.org"}
